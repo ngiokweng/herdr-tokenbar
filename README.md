@@ -2,7 +2,7 @@
 
 `herdr-tokenbar` 是 Herdr 的 token 與 context 常駐狀態列插件。
 
-在 Herdr 分頁列右側常駐顯示目前 agent 的 token usage 與 context window，每兩秒更新，切換 pane 後跟隨新選取的 agent。
+在 Herdr agent 側欄逐一顯示各 agent 的累計 token 用量與 context 進度條；分頁列右側也會顯示目前 agent 的詳細用量，每兩秒更新。
 
 ```text
 Tokens 117.3k | Context 98.9k/828.4k 12%
@@ -24,7 +24,7 @@ herdr plugin link .
 herdr plugin action invoke herdr.tokenbar.enable
 ```
 
-啟用動作會備份目前的 `config.toml`，加入自己的狀態列項目並重新載入 Herdr 設定。現有的狀態項目、其他設定與設定檔中無關的註解會保留。重複啟用不會增加重複項目。若目前 client 尚未更新顯示，在 Herdr Settings 執行 **reload config**，或重新連接 client。
+啟用動作會備份目前的 `config.toml`，加入狀態列項目與 agent 側欄用量列，並重新載入 Herdr 設定。現有的狀態項目、agent 列配置、其他設定與設定檔中無關的註解會保留。重複啟用不會增加重複項目。停用時會移除插件新增的用量列。若目前 client 尚未更新顯示，在 Herdr Settings 執行 **reload config**，或重新連接 client。
 
 支援 `HERDR_CONFIG_PATH` 指定的設定檔。腳本複製到插件設定目錄內的固定 runtime 路徑，常駐顯示不依賴目前工作目錄，也不會因 Herdr 清理舊版插件安裝目錄而失效。更新插件後再執行一次 `enable` 即可更新 runtime；Herdr server 啟動時也會同步 runtime。
 
@@ -51,7 +51,7 @@ Codex 的原始 `total_tokens` 包含快取輸入，不能直接拿來與 `/stat
 
 請使用 `enable` 輸出的實際路徑，並按照 JSON 規則跳脫 Windows 路徑中的反斜線及引號。需要從 Herdr pane 啟動 Claude，讓 statusline 能取得 `HERDR_PANE_ID`。這個接收器也會在 Claude 自己的狀態列印出用量。插件不會自動覆寫現有的 Claude statusline；已有自訂命令時可在原命令中串接接收器。Claude 的資料上限直接取自 statusline payload，不自行假設 200k 或 1M。此接口已用合成 payload 測試，仍需在實際 Claude session 中設定。
 
-其他 agent 目前顯示 `--`。本機插件無法讀取其他機器的 session 檔；遠端機器需要安裝插件並配置對應路徑。
+側欄和分頁列目前支援 Codex 與 Claude Code；其他 agent 的用量會顯示 `--`。本機插件無法讀取其他機器的 session 檔；遠端機器需要安裝插件並配置對應路徑。
 
 ## 查看原始數字
 

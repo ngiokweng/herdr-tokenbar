@@ -31,6 +31,16 @@ export function formatStatus(usage) {
   return `Tokens ${formatTokens(usage?.total)} | Context ${formatTokens(usage?.contextUsed)}/${formatTokens(usage?.contextWindow)}${percentage}`;
 }
 
+/** Render the cumulative token count beside a context-window progress bar. */
+export function formatAgentTokenRow(usage) {
+  const rawPercent = usage?.percent;
+  const percent = typeof rawPercent === 'number' && Number.isFinite(rawPercent) && rawPercent >= 0
+    ? Math.min(100, rawPercent) : null;
+  const filled = percent === null ? 0 : Math.round(percent / 100 * 8);
+  const bar = `${'█'.repeat(filled)}${'░'.repeat(8 - filled)}`;
+  return `T ${formatTokens(usage?.total)} C ${percent === null ? '--' : `${Math.round(percent)}%`} ${bar}`;
+}
+
 /**
  * Select an agent without borrowing another pane's usage.
  * @param {object[]} agents Herdr agent list.
@@ -39,6 +49,30 @@ export function formatStatus(usage) {
  */
 export function selectAgent(agents, paneId) {
   return paneId ? agents.find(agent => agent.pane_id === paneId) : agents.find(agent => agent.focused);
+}
+
+async function listAgents(env) {
+  const { stdout } = await execute(env.HERDR_BIN_PATH || 'herdr', ['agent', 'list'], {
+    env, encoding: 'utf8', timeout: 1800, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
+  });
+  const response = JSON.parse(stdout);
+  if (response.error) throw new Error(response.error.message || 'Herdr API error');
+  const agents = response.result?.agents;
+  if (!Array.isArray(agents)) throw new Error('Unexpected Herdr agent list');
+  return agents;
+}
+
+async function usageForAgent(agent, env, directory) {
+  const session = agent?.agent_session;
+  if (!agent || session?.kind !== 'id') return null;
+  if (agent.agent === 'codex' && session.agent === 'codex') {
+    return loadCodexUsage(env.CODEX_HOME || join(homedir(), '.codex'), session.value, directory);
+  }
+  if (agent.agent === 'claude' && session.agent === 'claude') {
+    const sample = await readJson(join(directory, `claude-${safeSessionId(session.value)}.json`));
+    return sample?.sessionId === session.value && sample.paneId === agent.pane_id ? sample.usage : null;
+  }
+  return null;
 }
 
 /**
@@ -58,26 +92,53 @@ export async function stateDirectory(env = process.env) {
  * @returns {Promise<object>} Sample and session identity, or an unavailable-data reason.
  */
 export async function collectStatus({ env = process.env, paneId, stateDir } = {}) {
-  const { stdout } = await execute(env.HERDR_BIN_PATH || 'herdr', ['agent', 'list'], {
-    env, encoding: 'utf8', timeout: 1800, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
-  });
-  const response = JSON.parse(stdout);
-  if (response.error) throw new Error(response.error.message || 'Herdr API error');
-  const agents = response.result?.agents;
-  if (!Array.isArray(agents)) throw new Error('Unexpected Herdr agent list');
+  const agents = await listAgents(env);
   const agent = selectAgent(agents, paneId ?? env.HERDR_ACTIVE_PANE_ID);
   const session = agent?.agent_session;
   if (!agent || session?.kind !== 'id') return { usage: null, reason: 'no-agent-session', paneId: agent?.pane_id ?? paneId ?? env.HERDR_ACTIVE_PANE_ID ?? null };
   const directory = stateDir ?? await stateDirectory(env);
-  let usage = null;
-  if (agent.agent === 'codex' && session.agent === 'codex') {
-    usage = await loadCodexUsage(env.CODEX_HOME || join(homedir(), '.codex'), session.value, directory);
-  } else if (agent.agent === 'claude' && session.agent === 'claude') {
-    const sample = await readJson(join(directory, `claude-${safeSessionId(session.value)}.json`));
-    if (sample?.sessionId === session.value && sample.paneId === agent.pane_id) usage = sample.usage;
-  }
+  const usage = await usageForAgent(agent, env, directory);
   return { paneId: agent.pane_id, provider: agent.agent, sessionId: session.value,
     usage, reason: usage ? null : 'usage-unavailable' };
+}
+
+/** Load each live agent's provider usage for the Herdr sidebar. */
+export async function collectAgentUsages({ env = process.env, stateDir } = {}) {
+  const agents = await listAgents(env);
+  const needsState = agents.some(agent => agent.agent_session?.kind === 'id'
+    && ((agent.agent === 'codex' && agent.agent_session.agent === 'codex')
+      || (agent.agent === 'claude' && agent.agent_session.agent === 'claude')));
+  const directory = stateDir ?? (needsState ? await stateDirectory(env) : null);
+  return Promise.all(agents.map(async agent => {
+    try {
+      return { agent, usage: directory ? await usageForAgent(agent, env, directory) : null };
+    } catch (error) {
+      if (env.HERDR_TOKENBAR_DEBUG === '1' || env.HERDR_HOLD_TOKEN_DEBUG === '1') {
+        console.error(`Unable to read ${agent.agent} usage for ${agent.pane_id}: ${error.message}`);
+      }
+      return { agent, usage: null };
+    }
+  }));
+}
+
+/** Refresh display-only pane metadata; short TTLs clear rows after the command stops polling. */
+export async function reportAgentUsages(entries, env = process.env) {
+  const herdr = env.HERDR_BIN_PATH || 'herdr';
+  const results = await Promise.allSettled(entries.map(async ({ agent, usage }) => {
+    if (!agent?.pane_id || !agent.agent) return;
+    await execute(herdr, ['pane', 'report-metadata', agent.pane_id, '--source', 'herdr-tokenbar', '--agent', agent.agent,
+      '--token', `tokenbar=${formatAgentTokenRow(usage)}`, '--ttl-ms', '7000'], {
+      env, encoding: 'utf8', timeout: 1800, maxBuffer: 1024 * 1024, windowsHide: true,
+    });
+  }));
+  if (env.HERDR_TOKENBAR_DEBUG === '1' || env.HERDR_HOLD_TOKEN_DEBUG === '1') {
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const { agent } = entries[index];
+        console.error(`Unable to report token usage for ${agent?.pane_id ?? 'unknown pane'}: ${result.reason.message}`);
+      }
+    });
+  }
 }
 
 function safeSessionId(value) {
@@ -115,7 +176,18 @@ async function main(args) {
   const paneIndex = args.indexOf('--pane');
   if (paneIndex >= 0 && !args[paneIndex + 1]) throw new Error('--pane requires a pane ID');
   try {
-    const result = await collectStatus({ paneId: paneIndex >= 0 ? args[paneIndex + 1] : undefined });
+    const paneId = paneIndex >= 0 ? args[paneIndex + 1] : undefined;
+    let result;
+    if (args.includes('--herdr-tokenbar')) {
+      const entries = await collectAgentUsages();
+      await reportAgentUsages(entries);
+      const agent = selectAgent(entries.map(entry => entry.agent), paneId ?? process.env.HERDR_ACTIVE_PANE_ID);
+      result = { usage: entries.find(entry => entry.agent === agent)?.usage ?? null,
+        paneId: agent?.pane_id ?? paneId ?? process.env.HERDR_ACTIVE_PANE_ID ?? null,
+        reason: agent ? null : 'no-agent-session' };
+    } else {
+      result = await collectStatus({ paneId });
+    }
     console.log(args.includes('--json') ? JSON.stringify(result) : formatStatus(result.usage));
   } catch (error) {
     // Keep the fixed labels visible while Herdr reconnects or a transcript is inaccessible.

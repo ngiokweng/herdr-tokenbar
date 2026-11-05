@@ -2,7 +2,7 @@ id = "herdr.tokenbar"
 name = "TokenBar"
 version = "0.1.2"
 min_herdr_version = "0.9.4"
-description = "Keep token usage and the active agent's context window in the tab bar."
+description = "Show per-agent token usage and context progress in the sidebar and tab bar."
 platforms = ["linux", "macos", "windows"]
 
 [[build]]

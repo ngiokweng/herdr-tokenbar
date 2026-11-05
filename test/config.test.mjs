@@ -18,7 +18,8 @@ test('add a persistent status alongside existing entries and preserve unrelated 
   assert.equal(config.ui.tab_bar_right[0].type, 'datetime');
   assert.equal(config.ui.tab_bar_right[1].command, command);
   assert.ok(updated.startsWith('# my settings\r\n[ui]\r\n# clock\r\n'));
-  assert.ok(updated.endsWith('status_indicators = "dots"\r\n\r\n[theme]\r\nname = "catppuccin"\r\n'));
+  assert.ok(updated.includes('status_indicators = "dots"\r\n\r\n[theme]\r\nname = "catppuccin"\r\n'));
+  assert.deepEqual(config.ui.sidebar.agents.rows.at(-1), ['$tokenbar']);
   assert.equal(editStatusConfig(updated, command, true), updated);
 });
 
@@ -26,9 +27,33 @@ test('disable removes only this plugin and repeated disable is a no-op', () => {
   const original = '[ui]\ntab_bar_right = [{ type = "hostname" }]\n';
   const enabled = editStatusConfig(original, command, true);
   const disabled = editStatusConfig(enabled, command, false);
-  assert.deepEqual(parse(disabled), parse(original));
+  assert.deepEqual(parse(disabled).ui.tab_bar_right, parse(original).ui.tab_bar_right);
+  assert.equal(parse(disabled).ui.sidebar.agents.rows.some(row => row.includes('$tokenbar')), false);
   assert.equal(editStatusConfig(disabled, command, false), disabled);
   assert.equal(editStatusConfig('', command, false), '');
+});
+
+test('add and remove token rows for default and per-agent layouts', () => {
+  const defaults = [['state_icon', 'machine', 'workspace', 'tab'], ['agent']];
+  const defaultRows = parse(editStatusConfig('[ui]\n', command, true)).ui.sidebar.agents.rows;
+  assert.deepEqual(defaultRows, [...defaults, ['$tokenbar']]);
+  const childOnly = '[ui]\nstatus_indicators = "dots"\n'
+    + '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent"]]\n';
+  const childUpdated = parse(editStatusConfig(childOnly, command, true));
+  assert.deepEqual(childUpdated.ui.sidebar.agents.rows, [...defaults, ['$tokenbar']]);
+  assert.deepEqual(childUpdated.ui.sidebar.agents.rows_by_agent.claude.at(-1), ['$tokenbar']);
+  const original = '[ui]\nstatus_indicators = "dots"\n'
+    + '[ui.sidebar.agents]\nrow_gap = 1\nrows = [["agent"]]\n'
+    + '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent"], ["terminal_title_stripped"]]\ncodex = [["agent"]]\n';
+  const enabled = editStatusConfig(original, command, true);
+  const config = parse(enabled);
+  assert.deepEqual(config.ui.sidebar.agents.rows, [['agent'], ['$tokenbar']]);
+  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.claude.at(-1), ['$tokenbar']);
+  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.codex.at(-1), ['$tokenbar']);
+  const disabled = editStatusConfig(enabled, command, false);
+  assert.deepEqual(parse(disabled).ui.sidebar, parse(original).ui.sidebar);
+  assert.deepEqual(parse(disabled).ui.tab_bar_right ?? [], parse(original).ui.tab_bar_right ?? []);
+  assert.equal(editStatusConfig(disabled, command, false), disabled);
 });
 
 test('renaming replaces the legacy status entry and preserves other commands', () => {

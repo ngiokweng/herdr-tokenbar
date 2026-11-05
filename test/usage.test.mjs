@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, appendFile, readFile, readdir, rm } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexUsage, claudeUsage, latestCodexUsage, loadCodexUsage, locateCodexSession } from '../src/usage.mjs';
-import { formatStatus, selectAgent, recordClaude } from '../src/status.mjs';
+import { formatAgentTokenRow, formatStatus, selectAgent, recordClaude } from '../src/status.mjs';
 
 const sessionId = '019a4d90-0000-7000-8000-000000000001';
 function event(overrides = {}) {
@@ -58,6 +58,12 @@ test('missing limits stay unavailable and rate-limit-only records do not replace
   const usage = codexUsage(event({ model_context_window: null, last_token_usage: null }));
   assert.equal(formatStatus(usage), 'Tokens 20k | Context --/--');
   assert.equal(formatStatus(null), 'Tokens -- | Context --/--');
+});
+
+test('agent row combines cumulative tokens with a bounded context progress bar', () => {
+  assert.equal(formatAgentTokenRow({ total: 12345, percent: 25 }), 'T 12.3k C 25% ██░░░░░░');
+  assert.equal(formatAgentTokenRow({ total: 12345, percent: 150 }), 'T 12.3k C 100% ████████');
+  assert.equal(formatAgentTokenRow(null), 'T -- C -- ░░░░░░░░');
 });
 
 test('reverse reader skips partial records, null usage and unrelated token_count text', async t => {
