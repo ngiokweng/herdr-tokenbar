@@ -1,0 +1,14 @@
+{
+  "name": "herdr-tokenbar",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Persistent token usage and context window status for Herdr",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/status.mjs && node --check src/usage.mjs && node --check src/config.mjs && node --check src/setup.mjs",
+    "status": "node src/status.mjs"
+  },
+  "dependencies": { "smol-toml": "^1.6.0" }
+}
