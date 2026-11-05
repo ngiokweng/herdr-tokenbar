@@ -56,10 +56,10 @@ test('add and remove token rows for default and per-agent layouts', () => {
   assert.equal(editStatusConfig(disabled, command, false), disabled);
 });
 
-test('renaming replaces the legacy status entry and preserves other commands', () => {
+test('updating the status command replaces its entry and preserves other commands', () => {
   const original = '[ui]\ntab_bar_right = [\n'
     + '{type="command",command="echo clock"},\n'
-    + '{type="command",command="node old/status.mjs --herdr-hold-token"}\n]\n';
+    + '{type="command",command="node previous/status.mjs --herdr-tokenbar"}\n]\n';
   const updated = editStatusConfig(original, command, true);
   assert.deepEqual(parse(updated).ui.tab_bar_right.map(entry => entry.command), ['echo clock', command]);
   assert.equal(editStatusConfig(updated, command, true), updated);
@@ -103,14 +103,10 @@ test('setup copies a self-contained runtime, backs up configuration and disables
   const config = join(directory, 'config.toml');
   const pluginConfig = join(directory, 'plugin config');
   await mkdir(pluginConfig);
-  const legacyRuntime = join(directory, 'herdr.hold-token', 'runtime');
-  const legacyState = join(directory, 'legacy-state');
-  await mkdir(legacyRuntime, { recursive: true });
-  await mkdir(legacyState);
-  await writeFile(join(legacyRuntime, 'runtime-settings.json'), JSON.stringify({ stateDir: legacyState }));
+  const stateDir = join(directory, 'state');
   await writeFile(config, '# keep this comment\n[ui]\nstatus_indicators="dots"\n');
   const env = { ...process.env, HERDR_CONFIG_PATH: config, HERDR_PLUGIN_CONFIG_DIR: pluginConfig,
-    HERDR_PLUGIN_STATE_DIR: join(directory, 'state'), HERDR_BIN_PATH: process.execPath };
+    HERDR_PLUGIN_STATE_DIR: stateDir, HERDR_BIN_PATH: process.execPath };
   const setup = action => execFileSync(process.execPath, ['src/setup.mjs', action], { env, encoding: 'utf8', windowsHide: true });
   setup('enable');
   const enabled = await readFile(config, 'utf8');
@@ -118,7 +114,7 @@ test('setup copies a self-contained runtime, backs up configuration and disables
   assert.ok(enabled.startsWith('# keep this comment'));
   assert.equal((await readdir(directory)).filter(name => name.endsWith('.bak')).length, 1);
   const script = join(pluginConfig, 'runtime', 'status.mjs');
-  assert.equal(JSON.parse(await readFile(join(pluginConfig, 'runtime', 'runtime-settings.json'), 'utf8')).stateDir, legacyState);
+  assert.equal(JSON.parse(await readFile(join(pluginConfig, 'runtime', 'runtime-settings.json'), 'utf8')).stateDir, stateDir);
   assert.match(execFileSync(process.execPath, [script, '--help'], { encoding: 'utf8', windowsHide: true }), /Usage:/);
   if (process.platform === 'win32') {
     const nativeCommand = parse(enabled).ui.tab_bar_right[0].command;
@@ -127,8 +123,10 @@ test('setup copies a self-contained runtime, backs up configuration and disables
     });
     assert.match(output, /Tokens -- \| Context --\/--/);
   }
+  env.HERDR_PLUGIN_STATE_DIR = join(directory, 'other-state');
   setup('enable');
   assert.equal(await readFile(config, 'utf8'), enabled);
+  assert.equal(JSON.parse(await readFile(join(pluginConfig, 'runtime', 'runtime-settings.json'), 'utf8')).stateDir, stateDir);
   setup('disable');
   assert.deepEqual(parse(await readFile(config, 'utf8')).ui.tab_bar_right, []);
 });

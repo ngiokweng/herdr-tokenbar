@@ -51,10 +51,7 @@ async function main(action) {
   if (!configDir) throw new Error('Run this command through herdr plugin action invoke herdr.tokenbar.enable');
   const runtime = join(configDir, 'runtime');
   const settings = await readJson(join(runtime, 'runtime-settings.json'));
-  const legacySettings = await readJson(join(dirname(configDir), 'herdr.hold-token', 'runtime', 'runtime-settings.json'));
-  // Existing Claude statusline commands still write here after the plugin is renamed.
-  const stateDir = settings?.stateDir ?? legacySettings?.stateDir
-    ?? process.env.HERDR_PLUGIN_STATE_DIR ?? join(configDir, 'state');
+  const stateDir = settings?.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? join(configDir, 'state');
   if (action !== 'disable') {
     await mkdir(runtime, { recursive: true });
     for (const name of ['status.mjs', 'usage.mjs']) await copyFile(join(dirname(fileURLToPath(import.meta.url)), name), join(runtime, name));

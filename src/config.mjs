@@ -151,9 +151,8 @@ export function editStatusConfig(text, command, enabled) {
   const config = parse(text);
   const entries = config.ui?.tab_bar_right ?? [];
   if (!Array.isArray(entries)) throw new Error('ui.tab_bar_right must be an array');
-  // Recognize the previous name so upgrading replaces its entry instead of adding a second bar.
   const owned = entry => entry.type === 'command'
-    && ['--herdr-tokenbar', '--herdr-hold-token'].some(marker => entry.command?.includes(marker));
+    && entry.command?.includes('--herdr-tokenbar');
   const filtered = entries.filter(entry => !owned(entry));
   if (enabled) filtered.push({ type: 'command', command, interval_seconds: 2, timeout_seconds: 4 });
   if (filtered.length > 16) throw new Error('Herdr supports at most 16 tab-bar entries');

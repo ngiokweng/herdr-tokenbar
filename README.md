@@ -28,8 +28,6 @@ herdr plugin action invoke herdr.tokenbar.enable
 
 支援 `HERDR_CONFIG_PATH` 指定的設定檔。腳本複製到插件設定目錄內的固定 runtime 路徑，常駐顯示不依賴目前工作目錄，也不會因 Herdr 清理舊版插件安裝目錄而失效。更新插件後再執行一次 `enable` 即可更新 runtime；Herdr server 啟動時也會同步 runtime。
 
-若已安裝舊名 `herdr.hold-token`，先執行 `herdr plugin unlink herdr.hold-token`，再執行上述 link 和 enable 命令。啟用時會取代舊的狀態列項目，並沿用既有數字快取，讓之前配置的 Claude statusline 仍能提供資料。舊設定與 runtime 目錄可保留。
-
 Herdr 會在分頁列太窄、空間不足時隱藏右側狀態區。拉寬終端即可恢復；行動版與摺疊顯示方式由 Herdr 控制。
 
 ## 資料來源
@@ -62,7 +60,7 @@ node src/status.mjs --json
 node src/status.mjs --pane $env:HERDR_PANE_ID --json
 ```
 
-第一個命令查看 Herdr 目前聚焦的 agent；第二個查看呼叫所在的 pane。`--json` 回傳精確數字、session ID、採樣時間及無資料的原因。一般輸出會縮寫為 `k`、`M`。設定 `HERDR_TOKENBAR_DEBUG=1` 可在 stderr 查看 API／檔案讀取錯誤。`HERDR_TOKENBAR_STATE_DIR` 可指定數字快取目錄；舊版 `HERDR_HOLD_TOKEN_DEBUG` 與 `HERDR_HOLD_TOKEN_STATE_DIR` 仍可使用。
+第一個命令查看 Herdr 目前聚焦的 agent；第二個查看呼叫所在的 pane。`--json` 回傳精確數字、session ID、採樣時間及無資料的原因。一般輸出會縮寫為 `k`、`M`。設定 `HERDR_TOKENBAR_DEBUG=1` 可在 stderr 查看 API／檔案讀取錯誤。`HERDR_TOKENBAR_STATE_DIR` 可指定數字快取目錄。
 
 插件只在本機讀取用量與寫入自己的數字快取，不會將對話傳送至網路，也不修改 agent 的 session 紀錄。Codex 紀錄從尾端向前讀取，跳過工具輸出和未寫完的事件，並快取檔案位置與採樣結果。
 

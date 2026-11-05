@@ -82,7 +82,7 @@ async function usageForAgent(agent, env, directory) {
  */
 export async function stateDirectory(env = process.env) {
   const settings = await readJson(join(dirname(fileURLToPath(import.meta.url)), 'runtime-settings.json'));
-  return env.HERDR_TOKENBAR_STATE_DIR ?? env.HERDR_HOLD_TOKEN_STATE_DIR
+  return env.HERDR_TOKENBAR_STATE_DIR
     ?? settings?.stateDir ?? env.HERDR_PLUGIN_STATE_DIR ?? join(homedir(), '.cache', 'herdr-tokenbar');
 }
 
@@ -113,7 +113,7 @@ export async function collectAgentUsages({ env = process.env, stateDir } = {}) {
     try {
       return { agent, usage: directory ? await usageForAgent(agent, env, directory) : null };
     } catch (error) {
-      if (env.HERDR_TOKENBAR_DEBUG === '1' || env.HERDR_HOLD_TOKEN_DEBUG === '1') {
+      if (env.HERDR_TOKENBAR_DEBUG === '1') {
         console.error(`Unable to read ${agent.agent} usage for ${agent.pane_id}: ${error.message}`);
       }
       return { agent, usage: null };
@@ -131,7 +131,7 @@ export async function reportAgentUsages(entries, env = process.env) {
       env, encoding: 'utf8', timeout: 1800, maxBuffer: 1024 * 1024, windowsHide: true,
     });
   }));
-  if (env.HERDR_TOKENBAR_DEBUG === '1' || env.HERDR_HOLD_TOKEN_DEBUG === '1') {
+  if (env.HERDR_TOKENBAR_DEBUG === '1') {
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         const { agent } = entries[index];
@@ -193,7 +193,7 @@ async function main(args) {
     // Keep the fixed labels visible while Herdr reconnects or a transcript is inaccessible.
     if (args.includes('--json')) console.log(JSON.stringify({ usage: null, reason: error.message }));
     else console.log(formatStatus(null));
-    if (process.env.HERDR_TOKENBAR_DEBUG === '1' || process.env.HERDR_HOLD_TOKEN_DEBUG === '1') console.error(error.message);
+    if (process.env.HERDR_TOKENBAR_DEBUG === '1') console.error(error.message);
   }
 }
 
