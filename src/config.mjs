@@ -3,7 +3,18 @@ import { parse, stringify } from 'smol-toml';
 
 const AGENT_TABLE = ['ui', 'sidebar', 'agents'];
 const DEFAULT_AGENT_ROWS = [['state_icon', 'machine', 'workspace', 'tab'], ['agent']];
-const TOKENBAR_ROW = ['$tokenbar'];
+const TOKENBAR_ROWS = [
+  [{ token: '$tokenbar_total', fg: '#89b4fa', dim: false }],
+  [{ token: '$tokenbar_context', dim: false }],
+  [
+    { token: '$tokenbar_healthy', fg: '#a6e3a1', dim: false },
+    { token: '$tokenbar_warning', fg: '#f9e2af', dim: false },
+    { token: '$tokenbar_critical', fg: '#f38ba8', bold: true, dim: false },
+    { token: '$tokenbar_unknown', fg: '#7f849c', dim: false },
+  ],
+];
+const OWNED_TOKENS = new Set(['$tokenbar', ...TOKENBAR_ROWS.flat().map(item => item.token)]);
+const SPACING_MARKER = '# herdr-tokenbar spacing';
 
 function inlineValue(value) {
   if (typeof value === 'string') return JSON.stringify(value);
@@ -70,7 +81,7 @@ function tableBounds(text, path) {
   return { start, end: next ? start + next.index : text.length };
 }
 
-function setTableValue(text, path, key, value) {
+function setTableValue(text, path, key, value, comment = '') {
   const config = parse(text);
   const table = pathValue(config, path);
   const current = table?.[key];
@@ -90,7 +101,7 @@ function setTableValue(text, path, key, value) {
     if (current !== undefined) throw new Error(`Use a direct ${[...path, key].join('.')} key before enabling`);
     const newline = text.includes('\r\n') ? '\r\n' : '\n';
     const prefix = text.slice(0, bounds.end);
-    return `${prefix}${prefix.endsWith(newline) ? '' : newline}${key} = ${inlineValue(value)}${newline}${text.slice(bounds.end)}`;
+    return `${prefix}${prefix.endsWith(newline) ? '' : newline}${key} = ${inlineValue(value)}${comment ? ` ${comment}` : ''}${newline}${text.slice(bounds.end)}`;
   }
   if (current !== undefined) throw new Error(`Use a direct [${path.join('.')}] table before enabling`);
   const newline = text.includes('\r\n') ? '\r\n' : '\n';
@@ -98,19 +109,36 @@ function setTableValue(text, path, key, value) {
   const insertion = child ? child.index : text.length;
   const before = text.slice(0, insertion);
   const prefix = before.endsWith(newline) || !before ? before : `${before}${newline}`;
-  return `${prefix}[${path.join('.')}]${newline}${key} = ${inlineValue(value)}${newline}${text.slice(insertion)}`;
+  return `${prefix}[${path.join('.')}]${newline}${key} = ${inlineValue(value)}${comment ? ` ${comment}` : ''}${newline}${text.slice(insertion)}`;
 }
 
 function tokenbarRows(rows, enabled) {
-  const isTokenbarRow = row => Array.isArray(row) && row.length === 1 && row[0] === '$tokenbar';
+  const isTokenbarRow = row => Array.isArray(row) && row.length > 0
+    && row.every(item => OWNED_TOKENS.has(typeof item === 'string' ? item : item?.token));
   if (!Array.isArray(rows)) throw new Error('ui.sidebar.agents rows must be an array');
-  if (enabled) return rows.some(isTokenbarRow) ? rows : [...rows, TOKENBAR_ROW];
-  return rows.filter(row => !isTokenbarRow(row));
+  const next = rows.filter(row => !isTokenbarRow(row));
+  if (enabled) next.push(...TOKENBAR_ROWS);
+  if (next.length > 16) throw new Error('Herdr supports at most 16 agent rows; leave room for the 3 TokenBar rows');
+  return next;
+}
+
+function ownedSpacing(text) {
+  const bounds = tableBounds(text, AGENT_TABLE);
+  if (!bounds) return null;
+  const section = text.slice(bounds.start, bounds.end);
+  const line = new RegExp(`^[ \\t]*row_gap[ \\t]*=[ \\t]*1[ \\t]*${escapeRegex(SPACING_MARKER)}[ \\t]*\\r?\\n?`, 'm').exec(section);
+  return line ? { start: bounds.start + line.index, end: bounds.start + line.index + line[0].length } : null;
 }
 
 function editAgentRows(text, config, enabled) {
   const agentSettings = pathValue(config, AGENT_TABLE);
   let result = text;
+  if (enabled && agentSettings?.row_gap === undefined) {
+    result = setTableValue(result, AGENT_TABLE, 'row_gap', 1, SPACING_MARKER);
+  } else if (!enabled && agentSettings?.row_gap === 1) {
+    const spacing = ownedSpacing(result);
+    if (spacing) result = result.slice(0, spacing.start) + result.slice(spacing.end);
+  }
   const currentRows = agentSettings?.rows;
   if (enabled || currentRows !== undefined) {
     const nextRows = tokenbarRows(currentRows ?? DEFAULT_AGENT_ROWS, enabled);
@@ -141,7 +169,7 @@ function editAgentRows(text, config, enabled) {
 }
 
 /**
- * Add/remove this plugin's tab-bar entry and agent row while retaining unrelated TOML settings and text.
+ * Add/remove this plugin's tab-bar entry, usage rows and default spacing while retaining custom settings.
  * @param {string} text Original config.toml contents.
  * @param {string} command Fully quoted status command.
  * @param {boolean} enabled Whether the plugin entry should be present.
@@ -186,6 +214,13 @@ export function editStatusConfig(text, command, enabled) {
   expected.ui ??= {};
   if (config.ui?.tab_bar_right !== undefined || filtered.length) expected.ui.tab_bar_right = filtered;
   const agentSettings = pathValue(config, AGENT_TABLE);
+  if (enabled && agentSettings?.row_gap === undefined) {
+    expected.ui.sidebar ??= {};
+    expected.ui.sidebar.agents ??= {};
+    expected.ui.sidebar.agents.row_gap = 1;
+  } else if (!enabled && agentSettings?.row_gap === 1 && ownedSpacing(text)) {
+    delete expected.ui.sidebar.agents.row_gap;
+  }
   const rows = agentSettings?.rows;
   if (enabled || rows !== undefined) {
     expected.ui.sidebar ??= {};

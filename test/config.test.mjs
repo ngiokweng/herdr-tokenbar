@@ -4,11 +4,36 @@ import { mkdtemp, mkdir, readFile, readdir, writeFile, rm } from 'node:fs/promis
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parse } from 'smol-toml';
+import { parse as parseToml } from 'smol-toml';
 import { editStatusConfig } from '../src/config.mjs';
 import { quoteArgument } from '../src/setup.mjs';
+import { formatAgentTokens } from '../src/status.mjs';
 
 const command = 'node "/path with spaces/status.mjs" --herdr-tokenbar';
+const parse = text => structuredClone(parseToml(text));
+const usageRows = [
+  [{ token: '$tokenbar_total', fg: '#89b4fa', dim: false }],
+  [{ token: '$tokenbar_context', dim: false }],
+  [
+    { token: '$tokenbar_healthy', fg: '#a6e3a1', dim: false },
+    { token: '$tokenbar_warning', fg: '#f9e2af', dim: false },
+    { token: '$tokenbar_critical', fg: '#f38ba8', bold: true, dim: false },
+    { token: '$tokenbar_unknown', fg: '#7f849c', dim: false },
+  ],
+];
+
+test('reported usage selects exactly one explicitly colored bar, including gray for missing data', () => {
+  const rows = parse(editStatusConfig('[ui]\n', command, true)).ui.sidebar.agents.rows;
+  const bar = rows.at(-1);
+  for (const [percent, color] of [[49.9, '#a6e3a1'], [50, '#f9e2af'], [65, '#f9e2af'],
+    [80, '#f9e2af'], [80.1, '#f38ba8'], [100, '#f38ba8'], [null, '#7f849c']]) {
+    const tokens = formatAgentTokens(percent === null ? null : { percent });
+    const visible = bar.filter(item => tokens[item.token.slice(1)] !== null);
+    assert.equal(visible.length, 1);
+    assert.equal(visible[0].fg, color);
+    assert.equal(visible[0].dim, false);
+  }
+});
 
 test('add a persistent status alongside existing entries and preserve unrelated text', () => {
   const original = '# my settings\r\n[ui]\r\n# clock\r\ntab_bar_right = [\r\n { type = "datetime", format = "%H:%M" }, # existing\r\n]\r\nstatus_indicators = "dots"\r\n\r\n[theme]\r\nname = "catppuccin"\r\n';
@@ -19,7 +44,8 @@ test('add a persistent status alongside existing entries and preserve unrelated 
   assert.equal(config.ui.tab_bar_right[1].command, command);
   assert.ok(updated.startsWith('# my settings\r\n[ui]\r\n# clock\r\n'));
   assert.ok(updated.includes('status_indicators = "dots"\r\n\r\n[theme]\r\nname = "catppuccin"\r\n'));
-  assert.deepEqual(config.ui.sidebar.agents.rows.at(-1), ['$tokenbar']);
+  assert.deepEqual(config.ui.sidebar.agents.rows.slice(-3), usageRows);
+  assert.equal(config.ui.sidebar.agents.row_gap, 1);
   assert.equal(editStatusConfig(updated, command, true), updated);
 });
 
@@ -36,24 +62,58 @@ test('disable removes only this plugin and repeated disable is a no-op', () => {
 test('add and remove token rows for default and per-agent layouts', () => {
   const defaults = [['state_icon', 'machine', 'workspace', 'tab'], ['agent']];
   const defaultRows = parse(editStatusConfig('[ui]\n', command, true)).ui.sidebar.agents.rows;
-  assert.deepEqual(defaultRows, [...defaults, ['$tokenbar']]);
+  assert.deepEqual(defaultRows, [...defaults, ...usageRows]);
   const childOnly = '[ui]\nstatus_indicators = "dots"\n'
     + '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent"]]\n';
   const childUpdated = parse(editStatusConfig(childOnly, command, true));
-  assert.deepEqual(childUpdated.ui.sidebar.agents.rows, [...defaults, ['$tokenbar']]);
-  assert.deepEqual(childUpdated.ui.sidebar.agents.rows_by_agent.claude.at(-1), ['$tokenbar']);
+  assert.deepEqual(childUpdated.ui.sidebar.agents.rows, [...defaults, ...usageRows]);
+  assert.deepEqual(childUpdated.ui.sidebar.agents.rows_by_agent.claude.slice(-3), usageRows);
   const original = '[ui]\nstatus_indicators = "dots"\n'
     + '[ui.sidebar.agents]\nrow_gap = 1\nrows = [["agent"]]\n'
     + '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent"], ["terminal_title_stripped"]]\ncodex = [["agent"]]\n';
   const enabled = editStatusConfig(original, command, true);
   const config = parse(enabled);
-  assert.deepEqual(config.ui.sidebar.agents.rows, [['agent'], ['$tokenbar']]);
-  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.claude.at(-1), ['$tokenbar']);
-  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.codex.at(-1), ['$tokenbar']);
+  assert.deepEqual(config.ui.sidebar.agents.rows, [['agent'], ...usageRows]);
+  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.claude.slice(-3), usageRows);
+  assert.deepEqual(config.ui.sidebar.agents.rows_by_agent.codex.slice(-3), usageRows);
   const disabled = editStatusConfig(enabled, command, false);
   assert.deepEqual(parse(disabled).ui.sidebar, parse(original).ui.sidebar);
   assert.deepEqual(parse(disabled).ui.tab_bar_right ?? [], parse(original).ui.tab_bar_right ?? []);
   assert.equal(editStatusConfig(disabled, command, false), disabled);
+});
+
+test('upgrade the original tokenbar row without duplicating it or touching custom styles', () => {
+  const original = '[ui]\n[ui.sidebar.agents]\nrows = [["state_icon", {token="workspace", bold=false}], ["agent"], ["$tokenbar"]]\n'
+    + '[ui.sidebar.agents.rows_by_agent]\nclaude = [["terminal_title"], ["$tokenbar"]]\n';
+  const enabled = editStatusConfig(original, command, true);
+  const config = parse(enabled).ui.sidebar.agents;
+  assert.deepEqual(config.rows, [['state_icon', { token: 'workspace', bold: false }], ['agent'], ...usageRows]);
+  assert.deepEqual(config.rows_by_agent.claude, [['terminal_title'], ...usageRows]);
+  assert.equal(editStatusConfig(enabled, command, true), enabled);
+  const disabled = parse(editStatusConfig(enabled, command, false)).ui.sidebar.agents;
+  assert.deepEqual(disabled.rows, config.rows.slice(0, -3));
+  assert.deepEqual(disabled.rows_by_agent.claude, [['terminal_title']]);
+  assert.equal(disabled.row_gap, undefined);
+});
+
+test('spacing is reversible and explicit user spacing is preserved', () => {
+  for (const gap of [undefined, 0, 1, 2]) {
+    const original = '[ui]\n[ui.sidebar.agents]\n' + (gap === undefined ? '' : `row_gap = ${gap} # custom spacing\n`)
+      + 'rows = [["agent"]]\n';
+    const enabled = editStatusConfig(original, command, true);
+    assert.equal(parse(enabled).ui.sidebar.agents.row_gap, gap ?? 1);
+    const disabled = editStatusConfig(enabled, command, false);
+    assert.deepEqual(parse(disabled).ui.sidebar, parse(original).ui.sidebar);
+    if (gap !== undefined) assert.ok(disabled.includes(`# custom spacing`));
+  }
+  const enabled = editStatusConfig('[ui]\n[ui.sidebar.agents]\nrows = [["agent"]]\n', command, true);
+  const customized = enabled.replace('row_gap = 1', 'row_gap = 2');
+  assert.equal(parse(editStatusConfig(customized, command, false)).ui.sidebar.agents.row_gap, 2);
+});
+
+test('leave room for all three usage rows within Herdr layout limits', () => {
+  const rows = Array.from({ length: 14 }, () => ['agent']);
+  assert.throws(() => editStatusConfig(`[ui]\n[ui.sidebar.agents]\nrows = ${JSON.stringify(rows)}\n`, command, true), /16 agent rows/);
 });
 
 test('updating the status command replaces its entry and preserves other commands', () => {

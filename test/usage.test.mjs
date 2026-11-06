@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, appendFile, readFile, readdir, rm } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexUsage, claudeUsage, latestCodexUsage, loadCodexUsage, locateCodexSession } from '../src/usage.mjs';
-import { formatAgentTokenRow, formatStatus, selectAgent, recordClaude } from '../src/status.mjs';
+import { formatAgentTokenRow, formatAgentTokens, formatTokens, formatStatus, selectAgent, recordClaude } from '../src/status.mjs';
 
 const sessionId = '019a4d90-0000-7000-8000-000000000001';
 function event(overrides = {}) {
@@ -60,10 +60,47 @@ test('missing limits stay unavailable and rate-limit-only records do not replace
   assert.equal(formatStatus(null), 'Tokens -- | Context --/--');
 });
 
-test('agent row combines cumulative tokens with a bounded context progress bar', () => {
-  assert.equal(formatAgentTokenRow({ total: 12345, percent: 25 }), 'T 12.3k C 25% ██░░░░░░');
-  assert.equal(formatAgentTokenRow({ total: 12345, percent: 150 }), 'T 12.3k C 100% ████████');
-  assert.equal(formatAgentTokenRow(null), 'T -- C -- ░░░░░░░░');
+test('legacy agent rows retain context counts and a bounded progress bar', () => {
+  assert.equal(formatAgentTokenRow({ total: 12345, contextUsed: 50000, contextWindow: 200000, percent: 25 }),
+    'T 12.3k C 50k/200k 25% ██░░░░');
+  assert.equal(formatAgentTokenRow({ total: 12345, percent: 150 }), 'T 12.3k C --/-- 100% ██████');
+  assert.equal(formatAgentTokenRow(null), 'T -- C --/-- -- ░░░░░░');
+});
+
+test('sidebar counts use k and the bar shows remaining context separately', () => {
+  const tokens = formatAgentTokens({ total: 117335, contextUsed: 98936, contextWindow: 828400 });
+  assert.equal(tokens.tokenbar_total, 'Tokens 117.3k');
+  assert.equal(tokens.tokenbar_context, 'Ctx 98.9k/828.4k');
+  assert.equal(tokens.tokenbar_healthy, '█░░░░░ 12% · 729.5k left');
+  assert.equal(tokens.tokenbar_warning, null);
+  assert.equal(tokens.tokenbar_critical, null);
+  assert.equal(tokens.tokenbar_unknown, null);
+  for (const [value, expected] of [[0, '0k'], [100, '0.1k'], [1000, '1k'], [12345, '12.3k'],
+    [1000000, '1,000k'], [1456215, '1,456.2k']]) assert.equal(formatTokens(value), expected);
+  for (const value of [null, undefined, -1, NaN, Infinity, '123']) assert.equal(formatTokens(value), '--');
+});
+
+test('bar is green below 50%, yellow through 80%, red above 80%, and clears inactive states', () => {
+  for (const [percent, level] of [[0, 'healthy'], [49.9, 'healthy'], [50, 'warning'], [65, 'warning'],
+    [80, 'warning'], [80.1, 'critical'], [100, 'critical'], [150, 'critical']]) {
+    const tokens = formatAgentTokens({ contextUsed: percent * 2000, contextWindow: 200000, percent });
+    const active = Object.entries(tokens).filter(([key, value]) => /^tokenbar_(healthy|warning|critical|unknown)$/.test(key) && value !== null);
+    assert.deepEqual(active.map(([key]) => key), [`tokenbar_${level}`]);
+    assert.match(active[0][1], new RegExp(`${Math.round(Math.min(percent, 100))}%`));
+    if (percent >= 100) assert.match(active[0][1], /0k left$/);
+  }
+});
+
+test('missing or invalid usage stays neutral instead of implying available context', () => {
+  for (const usage of [null, {}, { percent: -1 }, { percent: NaN }, { percent: Infinity }, { contextUsed: 0, contextWindow: 0 }]) {
+    const tokens = formatAgentTokens(usage);
+    assert.equal(tokens.tokenbar_unknown, '░░░░░░ -- · -- left');
+    assert.equal(tokens.tokenbar_healthy, null);
+    assert.equal(tokens.tokenbar_warning, null);
+    assert.equal(tokens.tokenbar_critical, null);
+  }
+  assert.equal(formatAgentTokens(null).tokenbar_total, 'Tokens --');
+  assert.equal(formatAgentTokens(null).tokenbar_context, 'Ctx --/--');
 });
 
 test('reverse reader skips partial records, null usage and unrelated token_count text', async t => {

@@ -4,20 +4,19 @@ import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { claudeUsage, loadCodexUsage, readJson, writeJson } from './usage.mjs';
+import { claudeUsage, loadCodexUsage, number, readJson, writeJson } from './usage.mjs';
 
 const execute = promisify(execFile);
+const tokenCount = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const BAR_WIDTH = 6;
 
 /**
- * Abbreviate a count for Herdr's limited status space.
+ * Format token counts in thousands consistently across Herdr's status surfaces.
  * @param {number|null} value Token count.
- * @returns {string} Count with optional k/M suffix, or -- for unavailable data.
+ * @returns {string} Count in k with up to one decimal, or -- for unavailable data.
  */
 export function formatTokens(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '--';
-  if (value < 1000) return String(Math.round(value));
-  const divisor = value >= 1_000_000 ? 1_000_000 : 1000;
-  return `${(value / divisor).toFixed(1).replace(/\.0$/, '')}${divisor === 1000 ? 'k' : 'M'}`;
+  return number(value) === null ? '--' : `${tokenCount.format(value / 1000)}k`;
 }
 
 /**
@@ -31,14 +30,42 @@ export function formatStatus(usage) {
   return `Tokens ${formatTokens(usage?.total)} | Context ${formatTokens(usage?.contextUsed)}/${formatTokens(usage?.contextWindow)}${percentage}`;
 }
 
-/** Render the cumulative token count beside a context-window progress bar. */
+/**
+ * Render a compact fallback for layouts that still use the original $tokenbar token.
+ * @param {object|null} usage Provider sample.
+ * @returns {string} Cumulative usage and context counts with a progress bar.
+ */
 export function formatAgentTokenRow(usage) {
-  const rawPercent = usage?.percent;
-  const percent = typeof rawPercent === 'number' && Number.isFinite(rawPercent) && rawPercent >= 0
-    ? Math.min(100, rawPercent) : null;
-  const filled = percent === null ? 0 : Math.round(percent / 100 * 8);
-  const bar = `${'█'.repeat(filled)}${'░'.repeat(8 - filled)}`;
-  return `T ${formatTokens(usage?.total)} C ${percent === null ? '--' : `${Math.round(percent)}%`} ${bar}`;
+  const { percent, bar } = contextProgress(usage);
+  return `T ${formatTokens(usage?.total)} C ${formatTokens(usage?.contextUsed)}/${formatTokens(usage?.contextWindow)} ${percent === null ? '--' : `${Math.round(percent)}%`} ${bar}`;
+}
+
+function contextProgress(usage) {
+  const used = number(usage?.contextUsed);
+  const window = number(usage?.contextWindow);
+  const rawPercent = number(usage?.percent) ?? (used !== null && window > 0 ? used / window * 100 : null);
+  const percent = rawPercent === null ? null : Math.min(100, rawPercent);
+  const filled = percent === null ? 0 : Math.round(percent / 100 * BAR_WIDTH);
+  return { percent, bar: `${'█'.repeat(filled)}${'░'.repeat(BAR_WIDTH - filled)}`,
+    remaining: used !== null && window > 0 ? Math.max(0, window - used) : null };
+}
+
+/**
+ * Split token counts from the colored context bar for narrow agent sidebars.
+ * @param {object|null} usage Provider sample.
+ * @returns {object} Metadata values; inactive color tokens are null so old states get cleared.
+ */
+export function formatAgentTokens(usage) {
+  const { percent, bar, remaining } = contextProgress(usage);
+  const level = percent === null ? 'unknown' : percent > 80 ? 'critical' : percent >= 50 ? 'warning' : 'healthy';
+  const tokens = {
+    tokenbar: formatAgentTokenRow(usage),
+    tokenbar_total: `Tokens ${formatTokens(usage?.total)}`,
+    tokenbar_context: `Ctx ${formatTokens(usage?.contextUsed)}/${formatTokens(usage?.contextWindow)}`,
+    tokenbar_healthy: null, tokenbar_warning: null, tokenbar_critical: null, tokenbar_unknown: null,
+  };
+  tokens[`tokenbar_${level}`] = `${bar} ${percent === null ? '--' : `${Math.round(percent)}%`} · ${formatTokens(remaining)} left`;
+  return tokens;
 }
 
 /**
@@ -126,8 +153,11 @@ export async function reportAgentUsages(entries, env = process.env) {
   const herdr = env.HERDR_BIN_PATH || 'herdr';
   const results = await Promise.allSettled(entries.map(async ({ agent, usage }) => {
     if (!agent?.pane_id || !agent.agent) return;
+    // Only one color token has a value. Clearing the others prevents stale bars after state changes.
+    const tokens = Object.entries(formatAgentTokens(usage)).flatMap(([key, value]) =>
+      value === null ? ['--clear-token', key] : ['--token', `${key}=${value}`]);
     await execute(herdr, ['pane', 'report-metadata', agent.pane_id, '--source', 'herdr-tokenbar', '--agent', agent.agent,
-      '--token', `tokenbar=${formatAgentTokenRow(usage)}`, '--ttl-ms', '7000'], {
+      ...tokens, '--ttl-ms', '7000'], {
       env, encoding: 'utf8', timeout: 1800, maxBuffer: 1024 * 1024, windowsHide: true,
     });
   }));

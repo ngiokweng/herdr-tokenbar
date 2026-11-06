@@ -4,6 +4,26 @@
 
 在 Herdr agent 側欄逐一顯示各 agent 的累計 token 用量與 context 進度條；分頁列右側也會顯示目前 agent 的詳細用量，每兩秒更新。
 
+側欄將 agent 身分、累計用量、context 數字與進度條分行顯示，agent 之間預設留一行空白：
+
+```text
+● Local · my-project · 1
+  codex
+  Tokens 117.3k
+  Ctx 98.9k/828.4k
+  █░░░░░ 12% · 729.5k left
+
+● Local · other-project · 2
+  claude
+  Tokens 581.3k
+  Ctx 148k/200k
+  ████░░ 74% · 52k left
+```
+
+所有 token 數字統一以 `k` 顯示（1k = 1,000 tokens），最多保留一位小數；超過百萬也維持 `k`，例如 `1,456.2k`。`Ctx` 是已用／上限，進度條與百分比表示已用比例，`left` 是剩餘 tokens。已用低於 50% 為綠色、50%～80%（含邊界）為黃色、超過 80% 為紅色；無資料時顯示灰色 `--`。
+
+分頁列維持精簡格式：
+
 ```text
 Tokens 117.3k | Context 98.9k/828.4k 12%
 ```
@@ -24,7 +44,7 @@ herdr plugin link .
 herdr plugin action invoke herdr.tokenbar.enable
 ```
 
-啟用動作會備份目前的 `config.toml`，加入狀態列項目與 agent 側欄用量列，並重新載入 Herdr 設定。現有的狀態項目、agent 列配置、其他設定與設定檔中無關的註解會保留。重複啟用不會增加重複項目。停用時會移除插件新增的用量列。若目前 client 尚未更新顯示，在 Herdr Settings 執行 **reload config**，或重新連接 client。
+啟用動作會備份目前的 `config.toml`，加入狀態列項目與 agent 側欄的三行用量，並重新載入 Herdr 設定。舊版單行 `$tokenbar` 會自動更新，包含 `rows_by_agent` 中的配置。現有的狀態項目、agent 身分列、其他設定與設定檔中無關的註解會保留。未設定 agent 的 `row_gap` 時會加入 `row_gap = 1`；已有明確設定時保留原值。重複啟用不會增加重複項目。停用時會移除插件新增的用量列與間距設定；若你已改動間距值，會保留你的設定。若目前 client 尚未更新顯示，在 Herdr Settings 執行 **reload config**，或重新連接 client。
 
 支援 `HERDR_CONFIG_PATH` 指定的設定檔。腳本複製到插件設定目錄內的固定 runtime 路徑，常駐顯示不依賴目前工作目錄，也不會因 Herdr 清理舊版插件安裝目錄而失效。更新插件後再執行一次 `enable` 即可更新 runtime；Herdr server 啟動時也會同步 runtime。
 
@@ -60,7 +80,7 @@ node src/status.mjs --json
 node src/status.mjs --pane $env:HERDR_PANE_ID --json
 ```
 
-第一個命令查看 Herdr 目前聚焦的 agent；第二個查看呼叫所在的 pane。`--json` 回傳精確數字、session ID、採樣時間及無資料的原因。一般輸出會縮寫為 `k`、`M`。設定 `HERDR_TOKENBAR_DEBUG=1` 可在 stderr 查看 API／檔案讀取錯誤。`HERDR_TOKENBAR_STATE_DIR` 可指定數字快取目錄。
+第一個命令查看 Herdr 目前聚焦的 agent；第二個查看呼叫所在的 pane。`--json` 回傳精確數字、session ID、採樣時間及無資料的原因。一般輸出統一使用 `k`。設定 `HERDR_TOKENBAR_DEBUG=1` 可在 stderr 查看 API／檔案讀取錯誤。`HERDR_TOKENBAR_STATE_DIR` 可指定數字快取目錄。
 
 插件只在本機讀取用量與寫入自己的數字快取，不會將對話傳送至網路，也不修改 agent 的 session 紀錄。Codex 紀錄從尾端向前讀取，跳過工具輸出和未寫完的事件，並快取檔案位置與採樣結果。
 
