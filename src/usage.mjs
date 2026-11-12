@@ -1,9 +1,10 @@
 /** Normalize provider usage without counting cached or reasoning tokens twice. */
-import { open, readdir, readFile, stat, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
-import { join, basename, dirname } from 'node:path';
+import { open, readdir, readFile, stat, lstat, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
+import { join, basename, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 
-const CODEX_USAGE_CACHE_VERSION = 2;
+const CODEX_USAGE_CACHE_VERSION = 3;
 
 /**
  * Validate a provider counter without coercing missing data to zero.
@@ -30,7 +31,8 @@ export function codexUsage(record) {
   const info = record.payload.info;
   if (!info) return null; // Rate-limit-only notifications carry no new usage.
   const contextUsed = total(info.last_token_usage);
-  const contextWindow = number(info.model_context_window);
+  const limit = number(info.model_context_window);
+  const contextWindow = limit > 0 ? limit : null;
   const cumulative = info.total_token_usage;
   const input = number(cumulative?.input_tokens);
   const cachedInput = number(cumulative?.cached_input_tokens) ?? 0;
@@ -40,6 +42,7 @@ export function codexUsage(record) {
   // Codex /status excludes cached input from usage, although cached tokens still occupy context.
   const statusTotal = uncachedInput !== null && output !== null ? uncachedInput + output
     : totalIncludingCached !== null ? Math.max(0, totalIncludingCached - cachedInput) : null;
+  if (statusTotal === null && contextUsed === null) return null;
   return {
     provider: 'codex', total: statusTotal, input: uncachedInput, cachedInput, output,
     totalIncludingCached, contextUsed, contextWindow,
@@ -93,7 +96,14 @@ export async function writeJson(file, value) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-    await rename(temporary, file);
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporary, file); break; } catch (error) {
+        // Windows scanners/readers and concurrent statusline writers can briefly deny replacement.
+        // Never delete the destination: readers must always see a complete old or new sample.
+        if (attempt >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+        await delay(10 * 2 ** attempt);
+      }
+    }
   } finally {
     await unlink(temporary).catch(() => {});
   }
@@ -127,9 +137,13 @@ async function findSession(directory, sessionId, depth = 0) {
  */
 export async function locateCodexSession(codexHome, sessionId, cachedPath) {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sessionId ?? '')) return null;
-  if (cachedPath && (basename(cachedPath) === `${sessionId}.jsonl`
+  const inside = typeof cachedPath === 'string' && ['sessions', 'archived_sessions'].some(root => {
+    const tail = relative(resolve(codexHome, root), resolve(cachedPath));
+    return tail && tail !== '..' && !tail.startsWith(`..${sep}`) && !isAbsolute(tail);
+  });
+  if (inside && (basename(cachedPath) === `${sessionId}.jsonl`
     || basename(cachedPath).endsWith(`-${sessionId}.jsonl`))
-    && await stat(cachedPath).then(value => value.isFile(), () => false)) return cachedPath;
+    && await lstat(cachedPath).then(value => value.isFile(), () => false)) return cachedPath;
   return await findSession(join(codexHome, 'sessions'), sessionId)
     ?? await findSession(join(codexHome, 'archived_sessions'), sessionId);
 }
@@ -145,29 +159,31 @@ export async function latestCodexUsage(file) {
     let position = (await handle.stat()).size;
     let carry = Buffer.alloc(0);
     let discarding = false;
+    const parse = line => {
+      if (line.length > 128 * 1024) return null;
+      const text = line.toString('utf8');
+      if (!text.includes('"token_count"')) return null;
+      try { return codexUsage(JSON.parse(text)); } catch { return null; }
+    };
     while (position > 0) {
       const length = Math.min(position, 64 * 1024);
       position -= length;
       const chunk = Buffer.alloc(length);
       const { bytesRead } = await handle.read(chunk, 0, length, position);
-      // The leading fragment belongs to the preceding block; visit complete records newest first.
-      const parts = Buffer.concat([chunk.subarray(0, bytesRead), carry]).toString('utf8').split('\n');
-      const first = parts.shift();
-      for (let index = parts.length - 1; index >= 0; index--) {
-        if (discarding && index === parts.length - 1) continue;
-        if (!parts[index].includes('"token_count"')) continue;
-        try {
-          const usage = codexUsage(JSON.parse(parts[index]));
+      const data = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
+      let end = data.length;
+      for (let index = data.length - 1; index >= 0; index--) {
+        if (data[index] !== 10) continue;
+        if (!discarding) {
+          const usage = parse(data.subarray(index + 1, end));
           if (usage) return usage;
-        } catch { /* A writer may still be appending the final record. */ }
+        }
+        discarding = false;
+        end = index;
       }
-      // Token events are small. Bound carry while skipping multi-megabyte transcript lines.
-      discarding = parts.length === 0 ? discarding : false;
-      carry = Buffer.from(first, 'utf8');
+      carry = data.subarray(0, end);
       if (carry.length > 128 * 1024) { carry = Buffer.alloc(0); discarding = true; }
-      if (position === 0 && !discarding && first.includes('"token_count"')) {
-        try { return codexUsage(JSON.parse(first)); } catch { return null; }
-      }
+      if (position === 0 && !discarding) return parse(carry);
     }
     return null;
   } finally { await handle.close(); }
@@ -180,14 +196,19 @@ export async function latestCodexUsage(file) {
  * @param {string} stateDir Plugin-owned cache directory.
  * @returns {Promise<object|null>} Latest sample, or null if no matching usage exists.
  */
-export async function loadCodexUsage(codexHome, sessionId, stateDir) {
+export async function loadCodexUsage(codexHome, sessionId, stateDir, sessionPath) {
   const key = createHash('sha256').update(`${codexHome}\0${sessionId}`).digest('hex');
   const cacheFile = join(stateDir, `codex-${key}.json`);
   const cache = await readJson(cacheFile);
-  const file = await locateCodexSession(codexHome, sessionId, cache?.file);
+  const file = await locateCodexSession(codexHome, sessionId, sessionPath ?? cache?.file);
   if (!file) return null;
   const info = await stat(file);
-  if (cache?.version === CODEX_USAGE_CACHE_VERSION && cache.file === file
+  const cachedUsage = cache?.usage;
+  const validCache = cachedUsage === null || (cachedUsage?.provider === 'codex'
+    && (number(cachedUsage.total) !== null || number(cachedUsage.contextUsed) !== null)
+    && ['total', 'input', 'cachedInput', 'output', 'totalIncludingCached', 'contextUsed', 'contextWindow', 'percent']
+      .every(key => cachedUsage[key] === null || number(cachedUsage[key]) !== null));
+  if (validCache && cache?.version === CODEX_USAGE_CACHE_VERSION && cache.file === file
     && cache.size === info.size && cache.mtime === info.mtimeMs) return cache.usage;
   const usage = await latestCodexUsage(file);
   await writeJson(cacheFile, { version: CODEX_USAGE_CACHE_VERSION, file, size: info.size, mtime: info.mtimeMs, usage }).catch(() => {});

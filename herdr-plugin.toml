@@ -1,6 +1,6 @@
 id = "herdr.tokenbar"
 name = "TokenBar"
-version = "0.1.2"
+version = "0.1.3"
 min_herdr_version = "0.9.4"
 description = "Show per-agent token usage and context progress in the sidebar and tab bar."
 platforms = ["linux", "macos", "windows"]

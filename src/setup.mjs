@@ -54,14 +54,14 @@ async function main(action) {
   const stateDir = settings?.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? join(configDir, 'state');
   if (action !== 'disable') {
     await mkdir(runtime, { recursive: true });
-    for (const name of ['status.mjs', 'usage.mjs']) await copyFile(join(dirname(fileURLToPath(import.meta.url)), name), join(runtime, name));
+    for (const name of ['presentation.mjs', 'sessions.mjs', 'usage.mjs', 'status.mjs']) await copyFile(join(dirname(fileURLToPath(import.meta.url)), name), join(runtime, name));
     await writeJson(join(runtime, 'runtime-settings.json'), { stateDir });
   }
   if (action === 'refresh') return;
   const script = join(runtime, 'status.mjs');
   const command = shellCommand([process.execPath, script, '--herdr-tokenbar']);
   const original = await readFile(target, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
-  const updated = editStatusConfig(original, command, action === 'enable');
+  const updated = editStatusConfig(original, command, action === 'enable', { separatorColors: process.env.HERDR_TOKENBAR_SEPARATOR_COLORS });
   if (updated !== original) {
     await mkdir(dirname(target), { recursive: true });
     const backup = `${target}.tokenbar-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;

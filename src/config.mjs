@@ -1,19 +1,13 @@
 /** Make narrowly scoped TOML edits while preserving unrelated settings and comments. */
 import { parse, stringify } from 'smol-toml';
+import { createTokenbarRows, LEGACY_PROGRESS_TOKENS, TOKENBAR_ROWS } from './presentation.mjs';
 
 const AGENT_TABLE = ['ui', 'sidebar', 'agents'];
 const DEFAULT_AGENT_ROWS = [['state_icon', 'machine', 'workspace', 'tab'], ['agent']];
-const TOKENBAR_ROWS = [
-  [{ token: '$tokenbar_total', fg: '#89b4fa', dim: false }],
-  [{ token: '$tokenbar_context', dim: false }],
-  [
-    { token: '$tokenbar_healthy', fg: '#a6e3a1', dim: false },
-    { token: '$tokenbar_warning', fg: '#f9e2af', dim: false },
-    { token: '$tokenbar_critical', fg: '#f38ba8', bold: true, dim: false },
-    { token: '$tokenbar_unknown', fg: '#7f849c', dim: false },
-  ],
-];
-const OWNED_TOKENS = new Set(['$tokenbar', ...TOKENBAR_ROWS.flat().map(item => item.token)]);
+const HEADER_TOKEN = '$tokenbar_header';
+const COMPACT_AGENT_ROWS = [['state_icon', HEADER_TOKEN]];
+const USAGE_TOKENS = new Set(['$tokenbar', ...LEGACY_PROGRESS_TOKENS, ...TOKENBAR_ROWS.flat().map(item => item.token)]);
+const OWNED_TOKENS = new Set([HEADER_TOKEN, ...USAGE_TOKENS]);
 const SPACING_MARKER = '# herdr-tokenbar spacing';
 
 function inlineValue(value) {
@@ -112,13 +106,34 @@ function setTableValue(text, path, key, value, comment = '') {
   return `${prefix}[${path.join('.')}]${newline}${key} = ${inlineValue(value)}${comment ? ` ${comment}` : ''}${newline}${text.slice(insertion)}`;
 }
 
-function tokenbarRows(rows, enabled) {
-  const isTokenbarRow = row => Array.isArray(row) && row.length > 0
-    && row.every(item => OWNED_TOKENS.has(typeof item === 'string' ? item : item?.token));
-  if (!Array.isArray(rows)) throw new Error('ui.sidebar.agents rows must be an array');
-  const next = rows.filter(row => !isTokenbarRow(row));
-  if (enabled) next.push(...TOKENBAR_ROWS);
-  if (next.length > 16) throw new Error('Herdr supports at most 16 agent rows; leave room for the 3 TokenBar rows');
+function removeRowTokens(rows, tokens) {
+  return rows.flatMap(row => {
+    const retained = row.filter(item => !tokens.has(typeof item === 'string' ? item : item?.token));
+    return row.length && !retained.length ? [] : [retained];
+  });
+}
+
+function tokenbarRows(rows, enabled, tokenRows) {
+  if (!Array.isArray(rows) || rows.some(row => !Array.isArray(row))) {
+    throw new Error('ui.sidebar.agents rows must be an array of arrays');
+  }
+  // Migrate only the known native layout. Custom identity rows and styles stay intact.
+  let next = removeRowTokens(rows, USAGE_TOKENS);
+  if (enabled && sameValue(next, DEFAULT_AGENT_ROWS)) {
+    next = structuredClone(COMPACT_AGENT_ROWS);
+  } else if (!enabled) {
+    next = next.flatMap(row => {
+      const names = row.map(item => typeof item === 'string' ? item : item?.token);
+      const hasIcon = sameValue(names, ['state_icon', HEADER_TOKEN]);
+      if (hasIcon || sameValue(names, [HEADER_TOKEN])) {
+        // Restore native identity even after styling the header or adding custom rows.
+        return [[...(hasIcon ? [row[0]] : []), ...DEFAULT_AGENT_ROWS[0].slice(1)], [...DEFAULT_AGENT_ROWS[1]]];
+      }
+      return removeRowTokens([row], OWNED_TOKENS);
+    });
+  }
+  if (enabled) next.push(...tokenRows);
+  if (next.length > 16) throw new Error('Herdr supports at most 16 agent rows; leave room for the 4 TokenBar rows');
   return next;
 }
 
@@ -126,22 +141,22 @@ function ownedSpacing(text) {
   const bounds = tableBounds(text, AGENT_TABLE);
   if (!bounds) return null;
   const section = text.slice(bounds.start, bounds.end);
-  const line = new RegExp(`^[ \\t]*row_gap[ \\t]*=[ \\t]*1[ \\t]*${escapeRegex(SPACING_MARKER)}[ \\t]*\\r?\\n?`, 'm').exec(section);
+  const line = new RegExp(`^[ \\t]*row_gap[ \\t]*=[ \\t]*[01][ \\t]*${escapeRegex(SPACING_MARKER)}[ \\t]*\\r?\\n?`, 'm').exec(section);
   return line ? { start: bounds.start + line.index, end: bounds.start + line.index + line[0].length } : null;
 }
 
-function editAgentRows(text, config, enabled) {
+function editAgentRows(text, config, enabled, tokenRows) {
   const agentSettings = pathValue(config, AGENT_TABLE);
   let result = text;
-  if (enabled && agentSettings?.row_gap === undefined) {
-    result = setTableValue(result, AGENT_TABLE, 'row_gap', 1, SPACING_MARKER);
-  } else if (!enabled && agentSettings?.row_gap === 1) {
+  if (enabled && (agentSettings?.row_gap === undefined || (agentSettings.row_gap === 1 && ownedSpacing(text)))) {
+    result = setTableValue(result, AGENT_TABLE, 'row_gap', 0, SPACING_MARKER);
+  } else if (!enabled && [0, 1].includes(agentSettings?.row_gap)) {
     const spacing = ownedSpacing(result);
     if (spacing) result = result.slice(0, spacing.start) + result.slice(spacing.end);
   }
   const currentRows = agentSettings?.rows;
   if (enabled || currentRows !== undefined) {
-    const nextRows = tokenbarRows(currentRows ?? DEFAULT_AGENT_ROWS, enabled);
+    const nextRows = tokenbarRows(currentRows ?? DEFAULT_AGENT_ROWS, enabled, tokenRows);
     if (JSON.stringify(currentRows) !== JSON.stringify(nextRows)) {
       result = setTableValue(result, AGENT_TABLE, 'rows', nextRows);
     }
@@ -152,7 +167,7 @@ function editAgentRows(text, config, enabled) {
   const overridesTable = [...AGENT_TABLE, 'rows_by_agent'];
   if (!tableBounds(result, overridesTable)) {
     const nextOverrides = Object.fromEntries(Object.entries(overrides).map(([agent, rows]) => [
-      agent, tokenbarRows(rows, enabled),
+      agent, tokenbarRows(rows, enabled, tokenRows),
     ]));
     if (!sameValue(overrides, nextOverrides)) {
       result = setTableValue(result, AGENT_TABLE, 'rows_by_agent', nextOverrides);
@@ -160,7 +175,7 @@ function editAgentRows(text, config, enabled) {
     return result;
   }
   for (const [agent, rows] of Object.entries(overrides)) {
-    const nextRows = tokenbarRows(rows, enabled);
+    const nextRows = tokenbarRows(rows, enabled, tokenRows);
     if (JSON.stringify(rows) !== JSON.stringify(nextRows)) {
       result = setTableValue(result, overridesTable, agent, nextRows);
     }
@@ -173,9 +188,11 @@ function editAgentRows(text, config, enabled) {
  * @param {string} text Original config.toml contents.
  * @param {string} command Fully quoted status command.
  * @param {boolean} enabled Whether the plugin entry should be present.
+ * @param {object} [options] Optional separatorColors palette (1-8 hex colors).
  * @returns {string} Validated configuration, unchanged when already configured.
  */
-export function editStatusConfig(text, command, enabled) {
+export function editStatusConfig(text, command, enabled, { separatorColors } = {}) {
+  const tokenRows = enabled ? createTokenbarRows(separatorColors) : TOKENBAR_ROWS;
   const config = parse(text);
   const entries = config.ui?.tab_bar_right ?? [];
   if (!Array.isArray(entries)) throw new Error('ui.tab_bar_right must be an array');
@@ -206,7 +223,7 @@ export function editStatusConfig(text, command, enabled) {
       result = `${text}${text.endsWith('\n') || !text ? '' : newline}[ui]${newline}tab_bar_right = ${value}${newline}`;
     }
   }
-  result = editAgentRows(result, config, enabled);
+  result = editAgentRows(result, config, enabled, tokenRows);
   if (result === text) return text;
   const check = parse(result);
   if (!sameValue(check.ui?.tab_bar_right ?? [], filtered)) throw new Error('Could not safely update the tab-bar configuration');
@@ -214,25 +231,25 @@ export function editStatusConfig(text, command, enabled) {
   expected.ui ??= {};
   if (config.ui?.tab_bar_right !== undefined || filtered.length) expected.ui.tab_bar_right = filtered;
   const agentSettings = pathValue(config, AGENT_TABLE);
-  if (enabled && agentSettings?.row_gap === undefined) {
+  if (enabled && (agentSettings?.row_gap === undefined || (agentSettings.row_gap === 1 && ownedSpacing(text)))) {
     expected.ui.sidebar ??= {};
     expected.ui.sidebar.agents ??= {};
-    expected.ui.sidebar.agents.row_gap = 1;
-  } else if (!enabled && agentSettings?.row_gap === 1 && ownedSpacing(text)) {
+    expected.ui.sidebar.agents.row_gap = 0;
+  } else if (!enabled && [0, 1].includes(agentSettings?.row_gap) && ownedSpacing(text)) {
     delete expected.ui.sidebar.agents.row_gap;
   }
   const rows = agentSettings?.rows;
   if (enabled || rows !== undefined) {
     expected.ui.sidebar ??= {};
     expected.ui.sidebar.agents ??= {};
-    expected.ui.sidebar.agents.rows = tokenbarRows(rows ?? DEFAULT_AGENT_ROWS, enabled);
+    expected.ui.sidebar.agents.rows = tokenbarRows(rows ?? DEFAULT_AGENT_ROWS, enabled, tokenRows);
   }
   const overrides = agentSettings?.rows_by_agent;
   if (overrides && typeof overrides === 'object' && !Array.isArray(overrides)) {
     expected.ui.sidebar ??= {};
     expected.ui.sidebar.agents ??= {};
     expected.ui.sidebar.agents.rows_by_agent = Object.fromEntries(Object.entries(overrides).map(([agent, rows]) => [
-      agent, tokenbarRows(rows, enabled),
+      agent, tokenbarRows(rows, enabled, tokenRows),
     ]));
   }
   // Serialization ignores key ordering but catches an edit landing inside a multiline string.
