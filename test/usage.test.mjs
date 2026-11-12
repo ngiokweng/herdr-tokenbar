@@ -71,7 +71,7 @@ test('sidebar counts use k and the bar shows remaining context separately', () =
   const tokens = formatAgentTokens({ total: 117335, contextUsed: 98936, contextWindow: 828400 });
   assert.equal(tokens.tokenbar_total, 'Tokens 117.3k');
   assert.equal(tokens.tokenbar_context, 'Ctx 98.9k/828.4k');
-  assert.equal(tokens.tokenbar_healthy, '█░░░░░ 12% · 729.5k left');
+  assert.equal(tokens.tokenbar_healthy, '█░░░░░ 12% · 剩余: 729.5k');
   assert.equal(tokens.tokenbar_warning, null);
   assert.equal(tokens.tokenbar_critical, null);
   assert.equal(tokens.tokenbar_unknown, null);
@@ -80,21 +80,21 @@ test('sidebar counts use k and the bar shows remaining context separately', () =
   for (const value of [null, undefined, -1, NaN, Infinity, '123']) assert.equal(formatTokens(value), '--');
 });
 
-test('bar is green below 50%, yellow through 80%, red above 80%, and clears inactive states', () => {
+test('legacy color tokens retain their thresholds and clear inactive states', () => {
   for (const [percent, level] of [[0, 'healthy'], [49.9, 'healthy'], [50, 'warning'], [65, 'warning'],
     [80, 'warning'], [80.1, 'critical'], [100, 'critical'], [150, 'critical']]) {
     const tokens = formatAgentTokens({ contextUsed: percent * 2000, contextWindow: 200000, percent });
     const active = Object.entries(tokens).filter(([key, value]) => /^tokenbar_(healthy|warning|critical|unknown)$/.test(key) && value !== null);
     assert.deepEqual(active.map(([key]) => key), [`tokenbar_${level}`]);
     assert.match(active[0][1], new RegExp(`${Math.round(Math.min(percent, 100))}%`));
-    if (percent >= 100) assert.match(active[0][1], /0k left$/);
+    if (percent >= 100) assert.match(active[0][1], /剩余: 0k$/);
   }
 });
 
 test('missing or invalid usage stays neutral instead of implying available context', () => {
   for (const usage of [null, {}, { percent: -1 }, { percent: NaN }, { percent: Infinity }, { contextUsed: 0, contextWindow: 0 }]) {
     const tokens = formatAgentTokens(usage);
-    assert.equal(tokens.tokenbar_unknown, '░░░░░░ -- · -- left');
+    assert.equal(tokens.tokenbar_unknown, '░░░░░░ -- · 剩余: --');
     assert.equal(tokens.tokenbar_healthy, null);
     assert.equal(tokens.tokenbar_warning, null);
     assert.equal(tokens.tokenbar_critical, null);
@@ -160,7 +160,7 @@ test('old cached totals are recomputed even when an idle session file has not ch
   cache.usage = { provider: 'codex', total: 100000 };
   await writeFile(cacheFile, JSON.stringify(cache));
   assert.equal((await loadCodexUsage(dir, sessionId, state)).total, 20000);
-  assert.equal(JSON.parse(await readFile(cacheFile, 'utf8')).version, 2);
+  assert.equal(JSON.parse(await readFile(cacheFile, 'utf8')).version, 3);
 });
 
 test('an explicit terminal pane never borrows another focused agent', () => {
