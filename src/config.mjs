@@ -199,7 +199,7 @@ export function editStatusConfig(text, command, enabled, { separatorColors } = {
   const owned = entry => entry.type === 'command'
     && entry.command?.includes('--herdr-tokenbar');
   const filtered = entries.filter(entry => !owned(entry));
-  if (enabled) filtered.push({ type: 'command', command, interval_seconds: 3, timeout_seconds: 8 });
+  if (enabled) filtered.push({ type: 'command', command, interval_seconds: 1, timeout_seconds: 8 });
   if (filtered.length > 16) throw new Error('Herdr supports at most 16 tab-bar entries');
   let result = text;
   if (JSON.stringify(entries) !== JSON.stringify(filtered)) {

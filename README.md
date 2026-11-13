@@ -2,7 +2,7 @@
 
 `herdr-tokenbar` 是 Herdr 的 token 與 context 常駐狀態列插件。
 
-在 Herdr agent 側欄逐一顯示各 agent 的累計 token 用量與 context 進度條；分頁列右側也會顯示目前 agent 的詳細用量，每兩秒更新。
+在 Herdr agent 側欄逐一顯示各 agent 的累計 token 用量與 context 進度條；分頁列右側也會顯示目前 agent 的詳細用量。預設每秒輪詢一次；提供者寫入新用量後，下一次輪詢會更新顯示。
 
 側欄每個 agent 保留四行資料：第一行合併機器／agent 與工作區名稱，其後是累計用量、context 數字與進度條；底部改用彩色橫線分隔，不再預設留空白行：
 
