@@ -194,6 +194,8 @@ test('updating the status command replaces its entry and preserves other command
     + '{type="command",command="node previous/status.mjs --herdr-tokenbar"}\n]\n';
   const updated = editStatusConfig(original, command, true);
   assert.deepEqual(parse(updated).ui.tab_bar_right.map(entry => entry.command), ['echo clock', command]);
+  assert.equal(parse(updated).ui.tab_bar_right[1].interval_seconds, 3);
+  assert.equal(parse(updated).ui.tab_bar_right[1].timeout_seconds, 8);
   assert.equal(editStatusConfig(updated, command, true), updated);
   assert.deepEqual(parse(editStatusConfig(original, command, false)).ui.tab_bar_right.map(entry => entry.command), ['echo clock']);
 });

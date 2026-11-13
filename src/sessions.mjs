@@ -1,9 +1,11 @@
 /** Resolve provider identity without selecting the newest transcript in a directory. */
-import { open } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve, win32 } from 'node:path';
+import { open, readdir, stat } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
 import { locateCodexSession } from './usage.mjs';
 
 export const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+const ACTIVE_SESSION_WINDOW_MS = 2 * 60 * 1000;
 
 /** Compare native or Windows directory names, even in cross-platform fixtures. */
 export function sameDirectory(left, right) {
@@ -64,6 +66,54 @@ async function sessionIndex(home) {
   } catch { return []; }
 }
 
+function sessionIdFromFile(file) {
+  const match = basename(file).match(/-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i);
+  return match?.[1] ?? null;
+}
+
+async function recentSessionFiles(home, now = Date.now()) {
+  const root = join(home, 'sessions');
+  const files = [];
+  // Codex stores active transcripts under YYYY/MM/DD. Check adjacent local
+  // dates to cover midnight and clock/time-zone boundaries without walking the
+  // entire session history on each status poll.
+  const dates = new Set([-1, 0, 1].map(offset => {
+    const date = new Date(now);
+    date.setDate(date.getDate() + offset);
+    return join(root, String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0'));
+  }));
+  await Promise.all([...dates].map(async directory => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.map(async entry => {
+      const path = join(directory, entry.name);
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) return;
+      const info = await stat(path).catch(() => null);
+      if (!info || now - info.mtimeMs < 0 || now - info.mtimeMs > ACTIVE_SESSION_WINDOW_MS) return;
+      const id = sessionIdFromFile(path);
+      if (id) files.push({ id, file: path, mtimeMs: info.mtimeMs });
+    }));
+  }));
+  return files;
+}
+
+async function activeSession(home, agent) {
+  if (agent?.agent_status !== 'working' || !agent.cwd) return null;
+  const candidates = [];
+  for (const candidate of await recentSessionFiles(home)) {
+    const metadata = await sessionMetadata(candidate.file).catch(() => null);
+    const id = metadata?.id ?? metadata?.session_id;
+    if (id !== candidate.id || !sameDirectory(metadata?.cwd, agent.cwd)) continue;
+    candidates.push({ ...candidate, metadata });
+  }
+  return candidates.length === 1 ? {
+    sessionId: candidates[0].id,
+    file: candidates[0].file,
+    sessionSource: 'active-cwd',
+    reason: null,
+  } : null;
+}
+
 /** Create one per poll: share lookups, but never persist a pane-to-thread guess across occupants. */
 export function codexSessionResolver(home) {
   let index;
@@ -116,6 +166,8 @@ export function codexSessionResolver(home) {
     if (matches.length === 1) return { sessionId: matches[0].id, file: matches[0].file, sessionSource: 'title-cwd', reason: null };
     // A thread can legitimately move to a worktree. A cwd change alone is not proof of a stale id.
     if (!matches.length && explicit && (!wrongCwd || !wrongTitle)) return authoritative();
+    const active = await activeSession(home, agent);
+    if (active) return active;
     return { sessionId: null, reason: matches.length > 1 ? 'ambiguous-agent-session'
       : wrongCwd ? 'session-cwd-mismatch' : id ? 'session-file-not-found' : 'no-agent-session' };
   };

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, appendFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, appendFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexSessionResolver, sameDirectory, sessionMetadata } from '../src/sessions.mjs';
@@ -20,12 +20,18 @@ async function fixture(t) {
   const stateDir = join(home, 'cache');
   const env = { CODEX_HOME: home };
   async function session(id = ID, options = {}) {
-    const folder = join(home, options.archived ? 'archived_sessions' : 'sessions', '2026', '11', '12');
+    const date = new Date();
+    const folder = join(home, options.archived ? 'archived_sessions' : 'sessions', String(date.getFullYear()),
+      String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0'));
     await mkdir(folder, { recursive: true });
     const file = join(folder, `rollout-time-${id}.jsonl`);
     const metadata = { id: options.metadataId ?? id, cwd: options.cwd ?? cwd };
     await writeFile(file, JSON.stringify({ type: 'session_meta', payload: metadata }) + '\n'
       + (options.empty ? '' : JSON.stringify(usage(options.total ?? 1000)) + '\n'));
+    if (options.ageMs) {
+      const modified = new Date(Date.now() - options.ageMs);
+      await utimes(file, modified, modified);
+    }
     return file;
   }
   async function index(rows = [{ id: ID, thread_name: 'Task' }]) {
@@ -90,6 +96,46 @@ test('same directory alone never chooses the newest or only transcript', async t
   const f = await fixture(t); await f.session(); await f.index([{ id: ID, thread_name: 'Not this task' }]);
   const result = await collectStatus(f.options([f.agent()]));
   assert.equal(result.usage, null); assert.equal(result.reason, 'no-agent-session');
+});
+
+test('recovers the only recent transcript by cwd for a working pane without a reported session', async t => {
+  const f = await fixture(t);
+  await f.session(ID, { total: 8700 });
+  await f.index([]);
+  const result = await collectStatus(f.options([f.agent({ agent_status: 'working', terminal_title_stripped: 'Unrelated task' })]));
+  assert.equal(result.sessionId, ID);
+  assert.equal(result.sessionSource, 'active-cwd');
+  assert.equal(result.usage.total, 8690);
+});
+
+test('recent transcripts in the same cwd remain ambiguous instead of choosing one', async t => {
+  const f = await fixture(t);
+  await f.session(ID);
+  await f.session(OTHER, { total: 9000 });
+  await f.index([{ id: ID, thread_name: 'Task' }, { id: OTHER, thread_name: 'Task' }]);
+  const result = await collectStatus(f.options([f.agent({ agent_status: 'working' })]));
+  assert.equal(result.sessionId, null);
+  assert.equal(result.usage, null);
+  assert.equal(result.reason, 'ambiguous-agent-session');
+});
+
+test('does not recover a transcript that has not been written recently', async t => {
+  const f = await fixture(t);
+  await f.session(ID, { ageMs: 5 * 60 * 1000 });
+  await f.index([]);
+  const result = await collectStatus(f.options([f.agent({ agent_status: 'working', terminal_title_stripped: 'Unrelated task' })]));
+  assert.equal(result.sessionId, null);
+  assert.equal(result.usage, null);
+  assert.equal(result.reason, 'no-agent-session');
+});
+
+test('active cwd recovery is limited to working panes', async t => {
+  const f = await fixture(t);
+  await f.session(ID);
+  await f.index([]);
+  const result = await collectStatus(f.options([f.agent({ agent_status: 'idle', terminal_title_stripped: 'Unrelated task' })]));
+  assert.equal(result.sessionId, null);
+  assert.equal(result.reason, 'no-agent-session');
 });
 
 test('a title match in another cwd is not session identity', async t => {
