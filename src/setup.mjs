@@ -54,7 +54,7 @@ async function main(action) {
   const stateDir = settings?.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? join(configDir, 'state');
   if (action !== 'disable') {
     await mkdir(runtime, { recursive: true });
-    for (const name of ['presentation.mjs', 'sessions.mjs', 'usage.mjs', 'status.mjs']) await copyFile(join(dirname(fileURLToPath(import.meta.url)), name), join(runtime, name));
+    for (const name of ['presentation.mjs', 'sessions.mjs', 'codex-live.mjs', 'usage.mjs', 'status.mjs']) await copyFile(join(dirname(fileURLToPath(import.meta.url)), name), join(runtime, name));
     await writeJson(join(runtime, 'runtime-settings.json'), { stateDir });
   }
   if (action === 'refresh') return;

@@ -249,6 +249,7 @@ test('setup copies a self-contained runtime, backs up configuration and disables
   assert.equal((await readdir(directory)).filter(name => name.endsWith('.bak')).length, 1);
   const script = join(pluginConfig, 'runtime', 'status.mjs');
   assert.equal(await readFile(join(pluginConfig, 'runtime', 'presentation.mjs'), 'utf8'), await readFile('src/presentation.mjs', 'utf8'));
+  assert.equal(await readFile(join(pluginConfig, 'runtime', 'codex-live.mjs'), 'utf8'), await readFile('src/codex-live.mjs', 'utf8'));
   assert.equal(JSON.parse(await readFile(join(pluginConfig, 'runtime', 'runtime-settings.json'), 'utf8')).stateDir, stateDir);
   assert.match(execFileSync(process.execPath, [script, '--help'], { encoding: 'utf8', windowsHide: true }), /Usage:/);
   if (process.platform === 'win32') {
