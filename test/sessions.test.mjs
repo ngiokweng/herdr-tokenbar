@@ -260,3 +260,120 @@ test('null JSON is not session metadata and does not crash identity recovery', a
   const f = await fixture(t); const file = join(f.home, 'null-header.jsonl');
   await writeFile(file, 'null\n'); assert.equal(await sessionMetadata(file), null);
 });
+
+const liveThread = (id, cwd, overrides = {}) => ({ id, cwd, status: 'active', parentThreadId: null,
+  source: 'vscode', ...overrides });
+
+test('/clear replaces an unloaded Herdr id and old title even after the old usage cache is populated', async t => {
+  const f = await fixture(t);
+  await f.session(ID, { total: 900000, ageMs: 60 * 60 * 1000 });
+  await f.index();
+  const agent = f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const options = f.options([agent]);
+  assert.equal((await collectStatus({ ...options, liveSessions: null })).usage.total, 899990);
+  // Open Windows files can keep their original mtime while new events are appended.
+  await f.session(OTHER, { total: 2000, ageMs: 10 * 60 * 1000 });
+  const result = await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] });
+  assert.equal(result.sessionId, OTHER);
+  assert.equal(result.sessionSource, 'codex-live');
+  assert.equal(result.usage.total, 1990);
+  assert.equal(result.usage.contextUsed, 2000);
+});
+
+test('/clear before the first token event clears old counters and later acquires only the new usage', async t => {
+  const f = await fixture(t);
+  await f.session(ID, { total: 900000 }); await f.index();
+  const file = await f.session(OTHER, { empty: true });
+  const options = { ...f.options([f.agent({ agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]), liveSessions: [liveThread(OTHER, f.cwd)] };
+  const before = await collectStatus(options);
+  assert.equal(before.sessionId, OTHER); assert.equal(before.usage, null);
+  assert.equal(before.reason, 'no-usage-events');
+  await appendFile(file, JSON.stringify(usage(100)) + '\n');
+  const after = await collectStatus(options);
+  assert.equal(after.sessionId, OTHER); assert.equal(after.usage.total, 90);
+});
+
+test('a loaded new thread without a persisted transcript cannot fall back to the old session', async t => {
+  const f = await fixture(t); await f.session(); await f.index();
+  const result = await collectStatus({ ...f.options([f.agent({ agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]), liveSessions: [liveThread(OTHER, f.cwd)] });
+  assert.equal(result.sessionId, OTHER); assert.equal(result.usage, null);
+  assert.equal(result.reason, 'session-file-not-found');
+});
+
+test('a reported id that is still loaded remains authoritative among other loaded threads in the same cwd', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.index();
+  const result = await collectStatus({ ...f.options([f.agent({ agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]),
+    liveSessions: [liveThread(ID, f.cwd), liveThread(OTHER, f.cwd)] });
+  assert.equal(result.sessionId, ID); assert.equal(result.sessionSource, 'herdr');
+});
+
+test('multiple loaded active threads cannot replace an unloaded id by recency', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const result = await collectStatus({ ...f.options([f.agent({ agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]),
+    liveSessions: [liveThread(OTHER, f.cwd), liveThread(THIRD, f.cwd)] });
+  assert.equal(result.sessionId, null); assert.equal(result.usage, null);
+  assert.equal(result.reason, 'ambiguous-agent-session');
+});
+
+test('a recovered active binding survives idle only while still loaded in the same terminal and Herdr mapping', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const agent = f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const active = [liveThread(OTHER, f.cwd), liveThread(THIRD, f.cwd, { status: 'idle' })];
+  assert.equal((await collectStatus({ ...f.options([agent]), liveSessions: active })).sessionId, OTHER);
+  const idle = active.map(thread => ({ ...thread, status: 'idle' }));
+  const options = { ...f.options([{ ...agent, agent_status: 'idle' }]), liveSessions: idle };
+  assert.equal((await collectStatus(options)).sessionId, OTHER);
+  const restarted = await collectStatus({ ...options, agents: [{ ...agent, terminal_id: 'terminal-2', agent_status: 'idle' }] });
+  assert.equal(restarted.sessionId, null); assert.equal(restarted.reason, 'ambiguous-agent-session');
+  // A second /clear unloads the recovered thread; its cached binding cannot survive it.
+  assert.equal((await collectStatus({ ...options, liveSessions: [idle[1]] })).sessionId, THIRD);
+});
+
+test('a newly active thread supersedes a cached idle recovery after another /clear', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const options = f.options([f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]);
+  assert.equal((await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] })).sessionId, OTHER);
+  const result = await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd, { status: 'idle' }), liveThread(THIRD, f.cwd)] });
+  assert.equal(result.sessionId, THIRD);
+});
+
+test('live recovery excludes subagents and never takes a session claimed by another pane', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const agent = f.agent({ agent_status: 'working', agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const peer = f.agent({ pane_id: 'w1:p2', focused: false, agent_session: { agent: 'codex', kind: 'id', value: OTHER } });
+  const live = [liveThread(OTHER, f.cwd), liveThread(THIRD, f.cwd, { parentThreadId: OTHER, source: { subAgent: {} } })];
+  const result = await collectStatus({ ...f.options([agent, peer]), liveSessions: live });
+  assert.equal(result.sessionId, null); assert.equal(result.usage, null);
+  assert.equal(result.reason, 'ambiguous-agent-session');
+});
+
+test('one live thread cannot be assigned to two unmapped panes in the same directory', async t => {
+  const f = await fixture(t); await f.session(); await f.index([]);
+  const agents = [f.agent({ agent_status: 'working' }), f.agent({ pane_id: 'w2:p1', agent_status: 'working', focused: false })];
+  const entries = await collectAgentUsages({ ...f.options(agents), liveSessions: [liveThread(ID, f.cwd)] });
+  assert.deepEqual(entries.map(entry => entry.reason), ['ambiguous-agent-session', 'ambiguous-agent-session']);
+});
+
+test('an unavailable local daemon preserves an existing valid reported session', async t => {
+  const f = await fixture(t); await f.session(); await f.index();
+  const result = await collectStatus({ ...f.options([f.agent({ agent_session: { agent: 'codex', kind: 'id', value: ID } })]), liveSessions: null });
+  assert.equal(result.sessionId, ID); assert.equal(result.sessionSource, 'herdr');
+});
+
+test('after recovering /clear, a daemon outage or unloaded thread cannot resurrect the old Herdr counters', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.index();
+  const options = f.options([f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]);
+  assert.equal((await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] })).sessionId, OTHER);
+  const offline = await collectStatus({ ...options, liveSessions: null });
+  assert.equal(offline.usage, null); assert.equal(offline.reason, 'session-state-unavailable');
+  const unloaded = await collectStatus({ ...options, liveSessions: [] });
+  assert.equal(unloaded.usage, null); assert.equal(unloaded.reason, 'no-agent-session');
+});

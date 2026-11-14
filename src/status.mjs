@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { claudeUsage, loadCodexUsage, number, readJson, writeJson } from './usage.mjs';
 import { codexSessionResolver } from './sessions.mjs';
+import { readLoadedCodexSessions } from './codex-live.mjs';
 import { BAR_WIDTH, GRADIENT_STYLES, gradientToken, separatorTokens, sessionColorSlots } from './presentation.mjs';
 
 const execute = promisify(execFile);
@@ -129,21 +130,25 @@ export async function stateDirectory(env = process.env) {
  * @param {object} [options] Optional env, paneId and stateDir overrides.
  * @returns {Promise<object>} Sample and session identity, or an unavailable-data reason.
  */
-export async function collectStatus({ env = process.env, paneId, stateDir, agents } = {}) {
+export async function collectStatus({ env = process.env, paneId, stateDir, agents, liveSessions } = {}) {
   agents ??= await listItems('agent', env);
   const target = paneId ?? env.HERDR_ACTIVE_PANE_ID;
   const agent = selectAgent(agents, target);
   if (!agent) return { usage: null, reason: 'no-agent-session', paneId: target ?? null };
-  const [{ agent: ignored, ...result }] = await collectAgentUsages({ env, stateDir, agents: [agent] });
+  const entries = await collectAgentUsages({ env, stateDir, agents, liveSessions });
+  const { agent: ignored, ...result } = entries.find(entry => entry.agent === agent);
   return { ...result, paneId: agent.pane_id, provider: agent.agent };
 }
 
 /** Load live provider usage; session recovery is shared by sidebar and tab-bar diagnostics. */
-export async function collectAgentUsages({ env = process.env, stateDir, agents } = {}) {
+export async function collectAgentUsages({ env = process.env, stateDir, agents, liveSessions } = {}) {
   agents ??= await listItems('agent', env);
   const directory = stateDir ?? await stateDirectory(env);
   const codexHome = env.CODEX_HOME || join(homedir(), '.codex');
-  const resolveCodex = codexSessionResolver(codexHome);
+  if (liveSessions === undefined && agents.some(agent => agent.agent === 'codex')) {
+    liveSessions = await readLoadedCodexSessions(codexHome, env);
+  }
+  const resolveCodex = codexSessionResolver(codexHome, { liveSessions, agents, stateDir: directory });
   return Promise.all(agents.map(async agent => {
     const base = { agent, usage: null, sessionId: null, sessionSource: null };
     try {

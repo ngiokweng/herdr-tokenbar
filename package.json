@@ -8,7 +8,7 @@
   "scripts": {
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage",
-    "check": "node --check src/presentation.mjs && node --check src/sessions.mjs && node --check src/status.mjs && node --check src/usage.mjs && node --check src/config.mjs && node --check src/setup.mjs",
+    "check": "node --check src/presentation.mjs && node --check src/sessions.mjs && node --check src/codex-live.mjs && node --check src/status.mjs && node --check src/usage.mjs && node --check src/config.mjs && node --check src/setup.mjs",
     "status": "node src/status.mjs"
   },
   "dependencies": { "smol-toml": "^1.6.0" }

@@ -1,7 +1,8 @@
 /** Resolve provider identity without selecting the newest transcript in a directory. */
 import { open, readdir, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { basename, isAbsolute, join, relative, resolve, win32 } from 'node:path';
-import { locateCodexSession } from './usage.mjs';
+import { locateCodexSession, readJson, writeJson } from './usage.mjs';
 
 export const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
@@ -114,8 +115,8 @@ async function activeSession(home, agent) {
   } : null;
 }
 
-/** Create one per poll: share lookups, but never persist a pane-to-thread guess across occupants. */
-export function codexSessionResolver(home) {
+/** Share lookups per poll; recovered bindings must still belong to a loaded thread and the same terminal/mapping. */
+export function codexSessionResolver(home, { liveSessions = null, agents = [], stateDir } = {}) {
   let index;
   const headers = new Map();
   const lookup = id => {
@@ -155,6 +156,50 @@ export function codexSessionResolver(home) {
     const indexed = id && records.find(record => record.id === id);
     const wrongTitle = indexed && !names.has(indexed.thread_name);
     const authoritative = () => ({ sessionId: id, file: explicit.file, sessionSource: 'herdr', reason: null });
+    const bindingKey = stateDir && agent.terminal_id && createHash('sha256')
+      .update(JSON.stringify([resolve(home), agent.pane_id, agent.terminal_id, agent.cwd, id])).digest('hex');
+    const bindingFile = bindingKey && join(stateDir, `codex-live-${bindingKey}.json`);
+    const binding = bindingFile ? await readJson(bindingFile) : null;
+    const recovered = SESSION_ID.test(binding?.sessionId) && binding.sessionId !== id;
+    if (!Array.isArray(liveSessions) && recovered) {
+      // Once disproved, a stale Herdr id cannot reappear during a daemon outage.
+      return { sessionId: null, reason: 'session-state-unavailable' };
+    }
+    // /clear can unload a thread without updating Herdr's id or terminal title.
+    // Loaded daemon metadata can disprove that stale mapping, even when Windows
+    // has not refreshed the open transcript's mtime. Never use newest-file wins.
+    if (Array.isArray(liveSessions) && !liveSessions.some(thread => thread.id === id)) {
+      const live = liveSessions.filter(thread => !thread.parentThreadId && typeof thread.source !== 'object'
+        && sameDirectory(thread.cwd, agent.cwd));
+      if (live.length) {
+        const peers = agents.filter(other => other.agent === 'codex' && other.pane_id !== agent.pane_id
+          && sameDirectory(other.cwd, agent.cwd));
+        const claimed = new Set(peers.map(other => other.agent_session?.value));
+        let candidates = live.filter(thread => !claimed.has(thread.id));
+        // Two unmapped panes in one directory are not distinguishable by cwd.
+        if (peers.some(other => !liveSessions.some(thread => thread.id === other.agent_session?.value))) candidates = [];
+        if (agent.agent_status === 'working') {
+          const active = candidates.filter(thread => thread.status === 'active');
+          if (active.length) candidates = active;
+        }
+        const named = candidates.filter(thread => names.has(thread.name));
+        if (named.length) candidates = named;
+        if (candidates.length > 1 && !named.length && !candidates.some(thread => thread.status === 'active') && bindingFile) {
+          // Keep the observed active binding when it becomes idle. /clear unloads
+          // it; a new active thread or a changed terminal/Herdr id supersedes it.
+          const bound = candidates.find(thread => thread.id === binding?.sessionId);
+          if (bound) candidates = [bound];
+        }
+        if (candidates.length !== 1) return { sessionId: null, reason: 'ambiguous-agent-session' };
+        const candidate = await lookup(candidates[0].id);
+        if (!candidate?.metadata || !sameDirectory(candidate.metadata.cwd, agent.cwd)) {
+          return { sessionId: candidates[0].id, sessionSource: 'codex-live', reason: 'session-file-not-found' };
+        }
+        if (bindingFile) await writeJson(bindingFile, { sessionId: candidate.id }).catch(() => {});
+        return { sessionId: candidate.id, file: candidate.file, sessionSource: 'codex-live', reason: null };
+      }
+      if (recovered) return { sessionId: null, reason: 'no-agent-session' };
+    }
     // A renamed/missing title alone cannot invalidate an otherwise valid Herdr mapping.
     if (explicit && !wrongCwd && !wrongTitle) return authoritative();
     const matches = [];

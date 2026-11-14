@@ -191,10 +191,10 @@ test('leave room for usage and separator rows within Herdr layout limits', () =>
 test('updating the status command replaces its entry and preserves other commands', () => {
   const original = '[ui]\ntab_bar_right = [\n'
     + '{type="command",command="echo clock"},\n'
-    + '{type="command",command="node previous/status.mjs --herdr-tokenbar"}\n]\n';
+    + '{type="command",command="node previous/status.mjs --herdr-tokenbar",interval_seconds=3,timeout_seconds=8}\n]\n';
   const updated = editStatusConfig(original, command, true);
   assert.deepEqual(parse(updated).ui.tab_bar_right.map(entry => entry.command), ['echo clock', command]);
-  assert.equal(parse(updated).ui.tab_bar_right[1].interval_seconds, 3);
+  assert.equal(parse(updated).ui.tab_bar_right[1].interval_seconds, 1);
   assert.equal(parse(updated).ui.tab_bar_right[1].timeout_seconds, 8);
   assert.equal(editStatusConfig(updated, command, true), updated);
   assert.deepEqual(parse(editStatusConfig(original, command, false)).ui.tab_bar_right.map(entry => entry.command), ['echo clock']);
@@ -249,6 +249,7 @@ test('setup copies a self-contained runtime, backs up configuration and disables
   assert.equal((await readdir(directory)).filter(name => name.endsWith('.bak')).length, 1);
   const script = join(pluginConfig, 'runtime', 'status.mjs');
   assert.equal(await readFile(join(pluginConfig, 'runtime', 'presentation.mjs'), 'utf8'), await readFile('src/presentation.mjs', 'utf8'));
+  assert.equal(await readFile(join(pluginConfig, 'runtime', 'codex-live.mjs'), 'utf8'), await readFile('src/codex-live.mjs', 'utf8'));
   assert.equal(JSON.parse(await readFile(join(pluginConfig, 'runtime', 'runtime-settings.json'), 'utf8')).stateDir, stateDir);
   assert.match(execFileSync(process.execPath, [script, '--help'], { encoding: 'utf8', windowsHide: true }), /Usage:/);
   if (process.platform === 'win32') {
