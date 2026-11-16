@@ -377,3 +377,82 @@ test('after recovering /clear, a daemon outage or unloaded thread cannot resurre
   const unloaded = await collectStatus({ ...options, liveSessions: [] });
   assert.equal(unloaded.usage, null); assert.equal(unloaded.reason, 'no-agent-session');
 });
+
+test('sending another message retains current usage when metadata is busy but the same thread is still loaded', async t => {
+  const f = await fixture(t); await f.session(ID, { total: 900000 });
+  const file = await f.session(OTHER, { total: 3000 }); await f.index();
+  const agent = f.agent({ terminal_id: 'terminal-1', agent_status: 'idle',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const options = f.options([agent]);
+  assert.equal((await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd, { status: 'idle' })] })).usage.total, 2990);
+  const pending = { ...options, agents: [{ ...agent, agent_status: 'working' }],
+    liveSessions: [{ id: OTHER, metadataUnavailable: true }] };
+  const during = await collectStatus(pending);
+  assert.equal(during.sessionId, OTHER); assert.equal(during.usage.total, 2990);
+  assert.equal(during.sessionSource, 'codex-live'); assert.equal(during.reason, null);
+  await appendFile(file, JSON.stringify(usage(5000)) + '\n');
+  assert.equal((await collectStatus(pending)).usage.total, 4990);
+});
+
+test('partial metadata cannot invent a new pane binding or restore an unloaded old binding after /clear', async t => {
+  const f = await fixture(t); await f.session(ID, { total: 900000 }); await f.session(OTHER); await f.index();
+  const options = f.options([f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]);
+  const partial = [{ id: OTHER, metadataUnavailable: true }];
+  const initial = await collectStatus({ ...options, liveSessions: partial });
+  assert.equal(initial.usage, null); assert.equal(initial.reason, 'session-state-unavailable');
+  assert.equal((await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] })).sessionId, OTHER);
+  const cleared = await collectStatus({ ...options, liveSessions: [{ id: THIRD, metadataUnavailable: true }] });
+  assert.equal(cleared.usage, null); assert.equal(cleared.reason, 'session-state-unavailable');
+  const relisted = await collectStatus({ ...options, liveSessions: partial });
+  assert.equal(relisted.usage, null); assert.equal(relisted.reason, 'session-state-unavailable');
+  const offline = await collectStatus({ ...options, liveSessions: null });
+  assert.equal(offline.usage, null); assert.equal(offline.reason, 'session-state-unavailable');
+});
+
+test('a cached thread with partial metadata remains scoped to its terminal, mapping and cwd', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.index();
+  const agent = f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const options = f.options([agent]);
+  await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] });
+  for (const changed of [{ terminal_id: 'terminal-2' }, { cwd: join(f.home, 'other') },
+    { agent_session: { agent: 'codex', kind: 'id', value: THIRD } }]) {
+    const sample = await collectStatus({ ...options, agents: [{ ...agent, ...changed }],
+      liveSessions: [{ id: OTHER, metadataUnavailable: true }] });
+    assert.equal(sample.usage, null); assert.equal(sample.reason, 'session-state-unavailable');
+  }
+});
+
+test('partial metadata retains the confirmed loaded binding until an unload proves a session switch', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const options = f.options([f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]);
+  await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] });
+  const sample = await collectStatus({ ...options,
+    liveSessions: [{ id: OTHER, metadataUnavailable: true }, liveThread(THIRD, f.cwd)] });
+  assert.equal(sample.sessionId, OTHER);
+  const cleared = await collectStatus({ ...options, liveSessions: [liveThread(THIRD, f.cwd)] });
+  assert.equal(cleared.sessionId, THIRD);
+});
+
+test('partial metadata cannot select a new candidate merely because all other cwd values are unavailable', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.session(THIRD); await f.index();
+  const options = f.options([f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } })]);
+  const sample = await collectStatus({ ...options,
+    liveSessions: [liveThread(OTHER, f.cwd), { id: THIRD, metadataUnavailable: true }] });
+  assert.equal(sample.usage, null); assert.equal(sample.reason, 'session-state-unavailable');
+});
+
+test('a pane cannot reuse a cached thread with unavailable metadata after another pane claims it', async t => {
+  const f = await fixture(t); await f.session(); await f.session(OTHER); await f.index();
+  const agent = f.agent({ terminal_id: 'terminal-1', agent_status: 'working',
+    agent_session: { agent: 'codex', kind: 'id', value: ID } });
+  const options = f.options([agent]);
+  await collectStatus({ ...options, liveSessions: [liveThread(OTHER, f.cwd)] });
+  const peer = f.agent({ pane_id: 'w1:p2', terminal_id: 'terminal-2', focused: false,
+    agent_session: { agent: 'codex', kind: 'id', value: OTHER } });
+  const sample = await collectStatus({ ...options, agents: [agent, peer], liveSessions: [{ id: OTHER, metadataUnavailable: true }] });
+  assert.equal(sample.usage, null); assert.equal(sample.reason, 'ambiguous-agent-session');
+});

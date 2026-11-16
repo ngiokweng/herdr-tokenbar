@@ -21,7 +21,7 @@ function serverFrame(payload, opcode = 1, final = true) {
   return Buffer.concat([header, data]);
 }
 
-async function fixture(t, { reply, fragments = false, badHandshake = false } = {}) {
+async function fixture(t, { reply, fragments = false, badHandshake = false, unavailableIds = [], stalledIds = [] } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'tokenbar-live-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(join(home, 'app-server-control'));
@@ -66,6 +66,11 @@ async function fixture(t, { reply, fragments = false, badHandshake = false } = {
         queueMicrotask(() => {
           if (!request.id) return;
           if (reply) { reply(request, respond, write); return; }
+          if (request.method === 'thread/read' && stalledIds.includes(request.params.threadId)) return;
+          if (request.method === 'thread/read' && unavailableIds.includes(request.params.threadId)) {
+            respond({ id: request.id, error: { code: -32000, message: 'Thread metadata temporarily unavailable' } });
+            return;
+          }
           const result = request.method === 'initialize' ? {}
             : request.method === 'thread/loaded/list' ? { data: request.params.cursor ? [OTHER] : [ID], nextCursor: request.params.cursor ? null : 'page-2' }
               : { thread: { id: request.params.threadId, cwd: home, status: { type: 'active' },
@@ -103,6 +108,34 @@ test('an authoritative empty loaded list is different from an unavailable daemon
   const f = await fixture(t, { reply: (request, respond) => respond({ id: request.id,
     result: request.method === 'initialize' ? {} : { data: [], nextCursor: null } }) });
   assert.deepEqual(await f.run(), []);
+});
+
+test('one busy thread cannot discard healthy metadata or its confirmed loaded identity', async t => {
+  const f = await fixture(t, { unavailableIds: [OTHER] });
+  const sessions = await f.run();
+  assert.equal(sessions[0].id, ID); assert.equal(sessions[0].cwd, f.home);
+  assert.deepEqual(sessions[1], { id: OTHER, metadataUnavailable: true });
+  assert.equal(f.child.killed, true);
+});
+
+test('a stalled metadata read returns the complete loaded list and available metadata at the deadline', async t => {
+  const f = await fixture(t, { stalledIds: [OTHER] });
+  const sessions = await f.run({ timeoutMs: 100 });
+  assert.equal(sessions[0].id, ID); assert.equal(sessions[0].cwd, f.home);
+  assert.deepEqual(sessions[1], { id: OTHER, metadataUnavailable: true });
+  assert.equal(f.child.killed, true);
+});
+
+test('metadata errors for all threads preserve loaded identities rather than pretending none are loaded', async t => {
+  const f = await fixture(t, { unavailableIds: [ID, OTHER] });
+  assert.deepEqual(await f.run(), [ID, OTHER].map(id => ({ id, metadataUnavailable: true })));
+});
+
+test('an incomplete loaded-list page cannot validate any cached identity', async t => {
+  const f = await fixture(t, { reply: (request, respond) => respond(request.params?.cursor
+    ? { id: request.id, error: { code: -32000 } }
+    : { id: request.id, result: request.method === 'initialize' ? {} : { data: [ID], nextCursor: 'page-2' } }) });
+  assert.equal(await f.run(), null);
 });
 
 test('a missing control socket does not launch a proxy or start a daemon', async t => {

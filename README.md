@@ -116,6 +116,7 @@ npm test
 
 ## 疑難排解與 0.1.3 修正
 
+- **傳送訊息後用量暫時變成 `--`：** 個別 Codex thread 的詳情查詢失敗或逾時時，不再丟棄其他 thread 的資料。只要本次輪詢已取得完整的載入 ID 清單，且原 terminal、Herdr 映射與已核對的 thread 仍有效，便繼續讀取該會話的最新用量。詳情不完整時不建立新映射；`/clear` 卸載舊 thread 後立即停用舊映射。載入清單本身無法取得時仍顯示 `--`，避免沿用無法確認的舊會話。
 - **`/clear` 後仍顯示舊會話用量：** 每次輪詢會透過本機 Codex daemon 的只讀介面核對已載入的 thread。Herdr 尚未更新 session ID 時，會以工作目錄、活動狀態及其他 pane 的映射確認新會話，排除舊 thread 與子代理；候選有歧義時顯示 `--`。新會話尚無第一筆 `token_count` 時也顯示 `--`，收到用量後只顯示新會話的數字。恢復的映射僅在原 terminal、Herdr 映射與已載入 thread 仍有效時保留；若 daemon 暫時無法讀取，不會再退回已判定過期的用量。
 - **新會話／安裝前已在執行的會話顯示 `--`：** 0.1.3 會在每次輪詢重新解析 session，並支援上述標題＋工作目錄恢復，不必重啟 agent。若尚未有第一筆 `token_count`、標題尚未寫入索引，或匹配有歧義，仍不會虛構數字。沒有本機 Codex daemon 的環境會沿用 Herdr／標題恢復；非標準安裝可用 `CODEX_BIN_PATH` 指定支援 `app-server proxy` 的 Codex 執行檔。
 - **Tokens 有值，但 Context 上限／百分比是 `--`：** 檢查 `--json` 的 `usage.contextWindow`。Codex 回報 `model_context_window: null` 時，插件無法知道實際上限；不按模型名稱猜測，也不沿用別的模型或會話的上限。

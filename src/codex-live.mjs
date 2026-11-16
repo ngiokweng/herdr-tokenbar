@@ -37,11 +37,16 @@ async function loadedSessionsFromProxy(child, timeoutMs) {
     return await new Promise(resolve => {
       let settled = false, upgraded = false, buffer = Buffer.alloc(0), fragments = [], fragmentSize = 0;
       let nextId = 1;
+      let loadedIds = null;
+      const metadata = new Map();
       const pending = new Map();
       const key = randomBytes(16).toString('base64');
       const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
       const finish = value => { if (!settled) { settled = true; resolve(value); } };
-      timer = setTimeout(() => finish(null), timeoutMs);
+      // A complete loaded-id list still validates an existing binding when a
+      // busy thread's metadata cannot be read before the deadline.
+      timer = setTimeout(() => finish(loadedIds?.map(id => metadata.get(id)
+        ?? { id, metadataUnavailable: true }) ?? null), timeoutMs);
       const fail = () => finish(null);
       child.on('error', fail);
       child.on('exit', fail);
@@ -69,14 +74,19 @@ async function loadedSessionsFromProxy(child, timeoutMs) {
           if (cursor && cursors.has(cursor)) throw new Error('Repeated cursor');
           cursors.add(cursor);
         } while (cursor);
-        const threads = await Promise.all([...new Set(ids)].map(async id => {
-          const result = await request('thread/read', { threadId: id, includeTurns: false });
+        loadedIds = [...new Set(ids)];
+        const threads = await Promise.all(loadedIds.map(async id => {
+          let result;
+          try { result = await request('thread/read', { threadId: id, includeTurns: false }); }
+          catch { return { id, metadataUnavailable: true }; }
           const thread = result?.thread;
           if (thread?.id !== id || typeof thread.cwd !== 'string' || typeof thread.status?.type !== 'string') {
             throw new Error('Invalid thread metadata');
           }
-          return { id, cwd: thread.cwd, status: thread.status.type, name: thread.name,
+          const entry = { id, cwd: thread.cwd, status: thread.status.type, name: thread.name,
             parentThreadId: thread.parentThreadId ?? null, source: thread.source };
+          metadata.set(id, entry);
+          return entry;
         }));
         finish(threads);
       };
@@ -140,7 +150,7 @@ async function loadedSessionsFromProxy(child, timeoutMs) {
   }
 }
 
-/** Return null when unavailable, distinct from an authoritative empty loaded-thread list. */
+/** Return null for an unavailable loaded list; entries may have metadataUnavailable when only their id was confirmed. */
 export async function readLoadedCodexSessions(home, env = process.env, { spawnProxy = spawn, timeoutMs = 1200 } = {}) {
   try {
     const control = join(home, 'app-server-control');

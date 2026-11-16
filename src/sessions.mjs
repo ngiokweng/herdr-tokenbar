@@ -165,12 +165,34 @@ export function codexSessionResolver(home, { liveSessions = null, agents = [], s
       // Once disproved, a stale Herdr id cannot reappear during a daemon outage.
       return { sessionId: null, reason: 'session-state-unavailable' };
     }
+    if (Array.isArray(liveSessions) && recovered && !binding.invalidated
+      && !liveSessions.some(thread => thread.id === binding.sessionId)) {
+      // Remember the unload even if a later partial snapshot lists that id
+      // again. Reusing it requires another complete metadata verification.
+      binding.invalidated = true;
+      await writeJson(bindingFile, binding).catch(() => {});
+    }
     // /clear can unload a thread without updating Herdr's id or terminal title.
     // Loaded daemon metadata can disprove that stale mapping, even when Windows
     // has not refreshed the open transcript's mtime. Never use newest-file wins.
     if (Array.isArray(liveSessions) && !liveSessions.some(thread => thread.id === id)) {
-      const live = liveSessions.filter(thread => !thread.parentThreadId && typeof thread.source !== 'object'
+      let live = liveSessions.filter(thread => !thread.parentThreadId && typeof thread.source !== 'object'
         && sameDirectory(thread.cwd, agent.cwd));
+      if (recovered && !binding.invalidated
+        && liveSessions.some(thread => thread.id === binding.sessionId && thread.metadataUnavailable)) {
+        // Reuse only a previously verified binding whose exact id is confirmed
+        // loaded in this poll. /clear removes it from that list immediately.
+        const bound = await lookup(binding.sessionId);
+        if (bound?.metadata && sameDirectory(bound.metadata.cwd, agent.cwd)) {
+          live.push({ id: binding.sessionId, cwd: agent.cwd, status: 'unknown' });
+        }
+      }
+      if (liveSessions.some(thread => thread.metadataUnavailable)) {
+        // Incomplete metadata cannot prove a new candidate is unique. Only
+        // retain the existing binding, with this poll confirming its loaded id.
+        live = recovered && !binding.invalidated ? live.filter(thread => thread.id === binding.sessionId) : [];
+        if (!live.length) return { sessionId: null, reason: 'session-state-unavailable' };
+      }
       if (live.length) {
         const peers = agents.filter(other => other.agent === 'codex' && other.pane_id !== agent.pane_id
           && sameDirectory(other.cwd, agent.cwd));
